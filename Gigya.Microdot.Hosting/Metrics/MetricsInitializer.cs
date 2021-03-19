@@ -18,16 +18,17 @@ namespace Gigya.Microdot.Hosting.Metrics
         public MetricsConfig MetricsConfig { get; private set; }
         private IMetricsSettings MetricsSettings { get; }
         public HealthMonitor HealthMonitor { get; set; }
+        private IConfiguration Configuration { get; }
         private ILog Log { get; }
-        private IEnvironmentVariableProvider EnvProvider { get; }
+        public CurrentApplicationInfo AppInfo { get; }
 
-
-        public MetricsInitializer(ILog log, IMetricsSettings metricsSettings, HealthMonitor healthMonitor, IEnvironmentVariableProvider envProvider)
+        public MetricsInitializer(ILog log, IConfiguration configuration, IMetricsSettings metricsSettings, HealthMonitor healthMonitor, CurrentApplicationInfo appInfo)
         {
+            Configuration = configuration;
             MetricsSettings = metricsSettings;
             HealthMonitor = healthMonitor;
             Log = log;
-            EnvProvider = envProvider;
+            AppInfo = appInfo;
         }
 
         public void Init()
@@ -40,11 +41,16 @@ namespace Gigya.Microdot.Hosting.Metrics
 
             Metric.Config.WithErrorHandler(ex =>
             {
-                if (metricsException != null)
+                if (metricsException == null)
                     metricsException = ex;
             }, true);
 
-            MetricsConfig = Metric.Config.WithHttpEndpoint($"http://+:{metricsPort}/");
+            var timeout = Configuration.GetObject<MetricsConfiguration>().InitializationTimeout;
+            MetricsConfig = Metric.Config.WithHttpEndpoint($"http://+:{metricsPort}/", maxRetries: 1);            
+            if (!MetricsConfig.WhenEndpointInitialized().Wait(timeout))
+            {
+                throw new EnvironmentException($"Metrics.NET could not be initialized. Timeout after {timeout.TotalSeconds} seconds.");
+            }
 
             if (metricsException != null)
             {
@@ -53,7 +59,7 @@ namespace Gigya.Microdot.Hosting.Metrics
                 {
                     throw new EnvironmentException(
                         $"Port {metricsPort} defined for Metrics.NET wasn't configured to run without administrative premissions.\nRun:\n" +
-                        $"netsh http add urlacl url=http://+:{metricsPort}/ user={CurrentApplicationInfo.OsUser}", metricsException);
+                        $"netsh http add urlacl url=http://+:{metricsPort}/ user={AppInfo.OsUser}", metricsException);
                 }
 
                 throw new EnvironmentException("Problem loading metrics.net", metricsException);

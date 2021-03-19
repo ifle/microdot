@@ -19,14 +19,56 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 #endregion
+
+using Gigya.Microdot.SharedLogic;
+using System;
+using System.IO;
+
 namespace Gigya.Microdot.Interfaces.SystemWrappers
 {
+    // TODO: Remove in favor of property in app instance
     public interface IEnvironment
     {
-        void SetEnvironmentVariableForProcess(string name, string value);
+        string this[string key] { get; }
 
-        string GetEnvironmentVariable(string name);
+        /// <summary>
+        /// The current Region this application runs in, e.g. "us1", "eu2".
+        /// Initialized from the environment variable "REGION".
+        /// </summary>
+        string Region { get; }
 
-        string PlatformSpecificPathPrefix { get; }
+        /// <summary>
+        /// The current Zone this application runs in, e.g. "us1a" or "eu2c". Initialized from the environment variable "ZONE".
+        /// </summary>
+        string Zone { get; }
+
+        /// <summary>
+        /// The current environment this application runs in, e.g. "prod", "st1" or "canary". Initialized from the environment variable "ENV".
+        /// </summary>        
+        string DeploymentEnvironment { get; }
+
+        // TODO: Abstract away
+        string ConsulAddress { get; }
+
+        /// <summary>
+        /// Logical instance name for the current application, which can be used to differentiate between
+        /// multiple identical applications running on the same host.
+        /// </summary>
+        string InstanceName { get; }
+        
+        /// <summary>
+        /// The configuration root directory.
+        /// </summary>
+        DirectoryInfo ConfigRoot { get; }
+
+        /// <summary>
+        /// Gets the current application information.
+        /// </summary>
+        CurrentApplicationInfo ApplicationInfo { get; }
+
+        /// <summary>
+        /// The load paths file.
+        /// </summary>
+        FileInfo LoadPathsFile { get; }
     }
 }

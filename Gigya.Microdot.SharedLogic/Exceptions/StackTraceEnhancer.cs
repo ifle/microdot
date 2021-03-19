@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Gigya.Common.Contracts.Exceptions;
 using Gigya.Microdot.Interfaces.Configuration;
 using Gigya.Microdot.Interfaces.Logging;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.ServiceContract.Exceptions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -13,26 +14,39 @@ namespace Gigya.Microdot.SharedLogic.Exceptions
 {
     public class StackTraceEnhancer : IStackTraceEnhancer
     {
+        private readonly IJsonExceptionSerializationSettings _jsonExceptionSerializationSettings;
+        private CurrentApplicationInfo AppInfo { get; }
         private Func<StackTraceEnhancerSettings> GetConfig { get; }
-        private IEnvironmentVariableProvider EnvironmentVariableProvider { get; }
-        private static readonly JsonSerializer Serializer = new JsonSerializer
-        {
-            TypeNameHandling = TypeNameHandling.All,
-            Binder = new ExceptionHierarchySerializationBinder(),
-            Formatting = Formatting.Indented,
-            DateParseHandling = DateParseHandling.DateTimeOffset,
-            Converters = { new StripHttpRequestExceptionConverter() }
-        };
+        private IEnvironment Environment { get; }
+        
 
-        public StackTraceEnhancer(Func<StackTraceEnhancerSettings> getConfig, IEnvironmentVariableProvider environmentVariableProvider)
+        public StackTraceEnhancer(
+            Func<StackTraceEnhancerSettings> getConfig, 
+            IEnvironment environment, 
+            CurrentApplicationInfo appInfo,
+            IJsonExceptionSerializationSettings jsonExceptionSerializationSettings)
         {
+            _jsonExceptionSerializationSettings = jsonExceptionSerializationSettings;
+            AppInfo = appInfo;
             GetConfig = getConfig;
-            EnvironmentVariableProvider = environmentVariableProvider;
+            Environment = environment;
         }
 
         public JObject ToJObjectWithBreadcrumb(Exception exception)
         {
-            var jobject = JObject.FromObject(exception, Serializer);
+            var breadcrumb = new Breadcrumb
+            {
+                ServiceName = AppInfo.Name,
+                ServiceVersion = AppInfo.Version.ToString(),
+                HostName = CurrentApplicationInfo.HostName,
+                DataCenter = Environment.Zone,
+                DeploymentEnvironment = Environment.DeploymentEnvironment
+            };
+
+            if (exception is SerializableException serEx)
+                serEx.AddBreadcrumb(breadcrumb);
+
+            var jobject = JObject.FromObject(exception, _jsonExceptionSerializationSettings.Serializer);
 
             if (GetConfig().Enabled == false)
                 return jobject;
@@ -45,18 +59,6 @@ namespace Gigya.Microdot.SharedLogic.Exceptions
                 jobject.Add("StackTraceString", null);
                 breadcrumbTarget = jobject.Property("StackTraceString");
             }
-
-            var breadcrumb = new Breadcrumb
-            {
-                ServiceName = CurrentApplicationInfo.Name,
-                ServiceVersion = CurrentApplicationInfo.Version.ToString(),
-                HostName = CurrentApplicationInfo.HostName,
-                DataCenter = EnvironmentVariableProvider.DataCenter,
-                DeploymentEnvironment = EnvironmentVariableProvider.DeploymentEnvironment
-            };
-
-            if (exception is SerializableException serEx)
-                serEx.AddBreadcrumb(breadcrumb);
 
             breadcrumbTarget.Value = $"\r\n--- End of stack trace from {breadcrumb} ---\r\n{breadcrumbTarget.Value}";
 

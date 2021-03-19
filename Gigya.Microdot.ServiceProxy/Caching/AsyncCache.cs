@@ -25,6 +25,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.Caching;
 using System.Runtime.Caching.Hosting;
 using System.Threading;
@@ -34,6 +35,9 @@ using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.ServiceContract.HttpService;
 using Metrics;
 using System.Threading.Tasks.Dataflow;
+using Gigya.Common.Contracts.Exceptions;
+using Gigya.Microdot.SharedLogic.Events;
+using Gigya.Microdot.SharedLogic.Utils;
 
 namespace Gigya.Microdot.ServiceProxy.Caching
 {
@@ -41,6 +45,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
     public sealed class AsyncCache : IMemoryCacheManager, IServiceProvider, IDisposable
     {
         private IDateTime DateTime { get; }
+        private Func<CacheConfig> GetRevokeConfig { get; }
         private ILog Log { get; }
         private MemoryCache MemoryCache { get; set; }
         private long LastCacheSizeBytes { get; set; }
@@ -70,14 +75,20 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         /// </summary>
         internal int CacheKeyCount => RevokeKeyToCacheKeysIndex.Sum(item => item.Value.Count);
 
+        private static long oneTime = 0;
 
-        public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener)
+        public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener, Func<CacheConfig> getRevokeConfig)
         {
             DateTime = dateTime;
+            GetRevokeConfig = getRevokeConfig;
             Log = log;
 
-            if (ObjectCache.Host == null)
+            // ReSharper disable once ConditionIsAlwaysTrueOrFalse
+            if (ObjectCache.Host == null
+                && Interlocked.CompareExchange(ref oneTime, 1, 0) == 0)
+            {
                 ObjectCache.Host = this;
+            }
             else
                 Log.Error("AsyncCache: Failed to register with ObjectCache.Host since it was already registered. Cache memory size will not be reported to Metrics.NET. Please make sure AsyncCache is singleton to prevent this issue.");
 
@@ -92,6 +103,8 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         private Task OnRevoke(string revokeKey)
         {
+            var shouldLog = GetRevokeConfig().LogRevokes;
+
             if (string.IsNullOrEmpty(revokeKey))
             {
                 Log.Warn("Error while revoking cache, revokeKey can't be null");
@@ -99,14 +112,23 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             }
 
             try
-            {                 
+            {    
+                if (shouldLog)
+                    Log.Info(x=>x("Revoke request received", unencryptedTags: new {revokeKey}));
+
                 if (RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey, out HashSet<string>  cacheKeys))
                 {
                     lock (cacheKeys)
                     {
                         var arrayOfCacheKeys = cacheKeys.ToArray();// To prevent iteration over modified collection.
+                        if (shouldLog && arrayOfCacheKeys.Length==0)
+                            Log.Info(x => x("There is no CacheKey to Revoke", unencryptedTags: new { revokeKey }));
+
                         foreach (var cacheKey in arrayOfCacheKeys)
                         {
+                            if (shouldLog)
+                                Log.Info(x => x("Revoking cacheKey", unencryptedTags: new { revokeKey, cacheKey }));
+
                             var unused = (AsyncCacheItem)MemoryCache.Remove(cacheKey);                            
                         }
                     }
@@ -114,13 +136,16 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 }
                 else
                 {
+                    if (shouldLog)
+                        Log.Info(x => x("Key is not cached. No revoke is needed", unencryptedTags: new { revokeKey }));
+
                     Revokes.Meter("Discarded", Unit.Events).Mark();
                 }                
             }
             catch (Exception ex)
             {
                 Revokes.Meter("Failed", Unit.Events).Mark();
-                Log.Warn("error while revoking cache", exception: ex, unencryptedTags: new {revokeKey});
+                Log.Warn("Error while revoking cache", exception: ex, unencryptedTags: new {revokeKey});
             }
             return Task.FromResult(true);
         }
@@ -133,6 +158,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             Metrics.Gauge("Entries", () => MemoryCache.GetCount(), Unit.Items);
             Metrics.Gauge("SizeLimit", () => MemoryCache.CacheMemoryLimit / MB, Unit.MegaBytes);
             Metrics.Gauge("RamUsageLimit", () => MemoryCache.PhysicalMemoryLimit, Unit.Percent);
+            Metrics.Gauge("ReverseIndexEntries", () => RevokeKeyToCacheKeysIndex.Count, Unit.Items);
 
             // Counters
             AwaitingResult = Metrics.Context("AwaitingResult");
@@ -149,20 +175,40 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         }
 
 
-        public Task GetOrAdd(string key, Func<Task> factory, Type taskResultType, CacheItemPolicyEx policy, params string[] metricsKeys)
+        public Task GetOrAdd(string key, Func<Task> factory, Type taskResultType, CacheItemPolicyEx policy, string groupName, string logData, string[] metricsKeys)
         {
-            var getValueTask = GetOrAdd(key, () => TaskConverter.ToWeaklyTypedTask(factory(), taskResultType), policy,  metricsKeys, taskResultType);
+            var getValueTask = GetOrAdd(key, () => TaskConverter.ToWeaklyTypedTask(factory(), taskResultType), policy, groupName, logData, metricsKeys, taskResultType);
             return TaskConverter.ToStronglyTypedTask(getValueTask, taskResultType);
         }
 
 
-        private Task<object> GetOrAdd(string key, Func<Task<object>> factory, CacheItemPolicyEx policy, string[] metricsKeys, Type taskResultType)
+        private Task<object> GetOrAdd(string key, Func<Task<object>> factory, CacheItemPolicyEx policy, string groupName, string logData, string[] metricsKeys, Type taskResultType)
         {
+            var shouldLog = ShouldLog(groupName);
+
             async Task<object> WrappedFactory(bool removeOnException)
             {
                 try
                 {
+                    if (shouldLog)
+                        Log.Info(x => x("Cache item is waiting for value to be resolved", unencryptedTags: new
+                        {
+                            cacheKey = key,
+                            cacheGroup = groupName,
+                            cacheData = logData
+                        }));
+
                     var result = await factory().ConfigureAwait(false);
+                    if (shouldLog)
+                    {
+                        Log.Info(x => x("Cache item value is resolved", unencryptedTags: new
+                        {
+                            cacheKey = key,
+                            cacheGroup = groupName,
+                            cacheData = logData,
+                            value = GetValueForLogging(result)
+                        }));
+                    }
                     //Can happen if item removed before task is completed
                     if(MemoryCache.Contains(key))
                     {
@@ -177,14 +223,30 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                                 {
                                     cacheKeys.Add(key);
                                 }
+                                Log.Info(x=>x("RevokeKey added to reverse index", unencryptedTags: new
+                                {
+                                    revokeKey = revokeKey,
+                                    cacheKey = key,
+                                    cacheGroup = groupName,
+                                    cacheData = logData
+                                }));
                             }
                         }
                     }
                     AwaitingResult.Decrement(metricsKeys);
                     return result;
                 }
-                catch
+                catch(Exception exception)
                 {
+                    Log.Info(x=>x("Error resolving value for cache item", unencryptedTags: new
+                    {
+                        cacheKey = key,
+                        cacheGroup = groupName,
+                        cacheData = logData,
+                        removeOnException,
+                        errorMessage = exception.Message
+                    }));
+
                     if(removeOnException)
                         MemoryCache.Remove(key); // Do not cache exceptions.
 
@@ -194,10 +256,12 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 }
             }
 
-            var newItem = new AsyncCacheItem();
+            
+            var newItem = shouldLog ? 
+                new AsyncCacheItem {GroupName =  string.Intern(groupName), LogData = logData} : 
+                new AsyncCacheItem (); // if log is not needed, then do not cache unnecessary details which will blow up the memory
 
             Task<object> resultTask;
-
             // Taking a lock on the newItem in case it actually becomes the item in the cache (if no item with that key
             // existed). For another thread, it will be returned into the existingItem variable and will block on the
             // second lock, preventing concurrent mutation of the same object.
@@ -209,7 +273,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 // Surprisingly, when using MemoryCache.AddOrGetExisting() where the item doesn't exist in the cache,
                 // null is returned.
                 var existingItem = (AsyncCacheItem)MemoryCache.AddOrGetExisting(key, newItem, policy);
-
+                
                 if (existingItem == null)
                 {
                     Misses.Mark(metricsKeys);
@@ -217,6 +281,13 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                     newItem.CurrentValueTask = WrappedFactory(true);
                     newItem.NextRefreshTime = DateTime.UtcNow + policy.RefreshTime;
                     resultTask = newItem.CurrentValueTask;
+                    if (shouldLog)
+                        Log.Info(x => x("Item added to cache", unencryptedTags: new
+                        {
+                            cacheKey = key,
+                            cacheGroup = groupName,
+                            cacheData = logData
+                        }));
                 }
                 else
                 {
@@ -224,28 +295,40 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                     // thread (which was the first to add from 'newItem', for subsequent threads it will be 'existingItem').
                     lock (existingItem.Lock)
                     {
+                        var cacheSuppress = TracingContext.CacheSuppress;
+                        var shouldSuppressCache = cacheSuppress != null && 
+                                                 (cacheSuppress == CacheSuppress.UpToNextServices ||
+                                                  cacheSuppress == CacheSuppress.RecursiveAllDownstreamServices);
                         resultTask = existingItem.CurrentValueTask;
 
                         // Start refresh if an existing refresh ins't in progress and we've passed the next refresh time.
-                        if (existingItem.RefreshTask == null && DateTime.UtcNow >= existingItem.NextRefreshTime)
+                        if ((existingItem.RefreshTask?.IsCompleted != false && DateTime.UtcNow >= existingItem.NextRefreshTime) || shouldSuppressCache)
                         {
-                            existingItem.RefreshTask = ((Func<Task>)(async () =>
+                            existingItem.RefreshTask = ((Func<Task<object>>)(async () =>
                                 {
                                     try
                                     {
                                         var getNewValue = WrappedFactory(false);
-                                        await getNewValue.ConfigureAwait(false);
+                                        var value = await getNewValue.ConfigureAwait(false);
                                         existingItem.CurrentValueTask = getNewValue;
                                         existingItem.NextRefreshTime = DateTime.UtcNow + policy.RefreshTime;
-                                        existingItem.RefreshTask = null;
                                         MemoryCache.Set(new CacheItem(key, existingItem), policy);
+                                        return value;
                                     }
-                                    catch
+                                    catch (Exception e)
                                     {
-                                        existingItem.NextRefreshTime = DateTime.UtcNow + policy.FailedRefreshDelay;
-                                        existingItem.RefreshTask = null;
+                                        if (shouldSuppressCache)
+                                            throw new EnvironmentException("Call to remote service failed (cache was suppressed)", e);
+                                        else
+                                        {
+                                            existingItem.NextRefreshTime = DateTime.UtcNow + policy.FailedRefreshDelay;
+                                            return null;
+                                        }
                                     }
                                 })).Invoke();
+
+                            if (shouldSuppressCache)
+                                resultTask = existingItem.RefreshTask;
                         }
                     }
 
@@ -258,25 +341,73 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
             return resultTask;
         }
-        
+
+        private ConcurrentDictionary<Type, FieldInfo> _revocableValueFieldPerType = new ConcurrentDictionary<Type, FieldInfo>();
+        private string GetValueForLogging(object value)
+        {
+            if (value is IRevocable)
+            {
+                var revocableValueField = _revocableValueFieldPerType.GetOrAdd(value.GetType(), t=>t.GetField(nameof(Revocable<int>.Value)));
+                if (revocableValueField != null)
+                    value = revocableValueField.GetValue(value);
+            }
+
+            if (value is ValueType || value is string)
+                return value.ToString();
+            else
+                return null;
+        }
+
         /// <summary>
         /// For revocable items , move over all revoke ids in cache index and remove them.
         /// </summary>        
         private void ItemRemovedCallback(CacheEntryRemovedArguments arguments)
-        {            
-            var cachedItem = ((AsyncCacheItem)arguments.CacheItem.Value).CurrentValueTask;
-            if(cachedItem.Status==TaskStatus.RanToCompletion && (cachedItem.Result as IRevocable)?.RevokeKeys!=null)
-            {
-                foreach(var revocationKey in ((IRevocable)cachedItem.Result).RevokeKeys)
+        {
+            var cacheItem = arguments.CacheItem.Value as AsyncCacheItem;
+
+            var shouldLog = ShouldLog(cacheItem?.GroupName);
+
+            if (shouldLog)
+                Log.Info(x=>x("Item removed from cache", unencryptedTags: new
                 {
-                    if (RevokeKeyToCacheKeysIndex.TryGetValue(revocationKey, out HashSet<string> cacheKeys))
+                    cacheKey     = arguments.CacheItem.Key,
+                    removeReason = arguments.RemovedReason.ToString(),
+                    cacheGroup   = cacheItem?.GroupName,
+                    cacheData    = cacheItem?.LogData
+                })); 
+
+            var cachedItem = ((AsyncCacheItem)arguments.CacheItem.Value).CurrentValueTask;
+
+            if(cachedItem.Status == TaskStatus.RanToCompletion      && 
+              (cachedItem.Result as IRevocable)?.RevokeKeys != null &&
+              !MemoryCache.Contains(arguments.CacheItem.Key)) //We want to remove items from reverseIndex only if they are not in MemoryCache
+            {                                                 //In MemoryCache.Set flow, we get here, but item is still in cache - so we skip removal
+                foreach (var revokeKey in ((IRevocable)cachedItem.Result).RevokeKeys)
+                {
+                    if (RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey, out HashSet<string> cacheKeys))
                     {
                         lock (cacheKeys)
                         {
                             cacheKeys.Remove(arguments.CacheItem.Key);
+                            Log.Info(x => x("RevokeKey removed from reverse index", unencryptedTags: new
+                            {
+                                cacheKey = arguments.CacheItem.Key,
+                                revokeKey = revokeKey,
+                                removeReason = arguments.RemovedReason.ToString(),
+                                cacheGroup = cacheItem?.GroupName,
+                                cacheData = cacheItem?.LogData
+                            }));
+
                             if (!cacheKeys.Any())
                             {
-                                RevokeKeyToCacheKeysIndex.TryRemove(revocationKey, out _);
+                                if (RevokeKeyToCacheKeysIndex.TryRemove(revokeKey, out _) && shouldLog)
+                                    Log.Info(x => x("Reverse index for cache item was removed", unencryptedTags: new
+                                    {
+                                        cacheKey = arguments.CacheItem.Key,                                        
+                                        removeReason = arguments.RemovedReason.ToString(),
+                                        cacheGroup = cacheItem?.GroupName,
+                                        cacheData = cacheItem?.LogData
+                                    }));
                             }
                         }
                     }
@@ -284,6 +415,18 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             }
 
             Items.Meter(arguments.RemovedReason.ToString(), Unit.Items).Mark();
+        }
+
+        private bool ShouldLog(string groupName)
+        {
+            if (groupName == null)
+                return false;
+
+            var config = GetRevokeConfig();
+            if (config.Groups.TryGetValue(groupName, out var groupConfig))
+                return groupConfig.WriteExtraLogs;
+
+            return false;
         }
 
 
@@ -325,4 +468,5 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             RevokeDisposable?.Dispose();
         }
     }
+
 }

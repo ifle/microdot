@@ -29,45 +29,29 @@ using Newtonsoft.Json.Linq;
 namespace Gigya.Microdot.SharedLogic.Exceptions
 {
 	/// <summary>
-	/// Serializes and deserializes exceptions into JSON, with inheritance hiearchy tolerance.
+	/// Serializes and deserializes exceptions into JSON, with inheritance hierarchy tolerance.
 	/// </summary>
 	public class JsonExceptionSerializer
 	{
-        private static readonly JsonSerializerSettings Settings = new JsonSerializerSettings
-		{
-			TypeNameHandling = TypeNameHandling.All,
-			Binder = new ExceptionHierarchySerializationBinder(),
-            Formatting = Formatting.Indented,
-            DateParseHandling = DateParseHandling.DateTimeOffset,
-            Converters = { new StripHttpRequestExceptionConverter() }
-        };
-
-	    private static readonly JsonSerializer Serializer = new JsonSerializer
-	    {
-	        TypeNameHandling = TypeNameHandling.All,
-	        Binder = new ExceptionHierarchySerializationBinder(),
-	        Formatting = Formatting.Indented,
-	        DateParseHandling = DateParseHandling.DateTimeOffset,
-	        Converters = { new StripHttpRequestExceptionConverter() }
-	    };
-
-	    private IStackTraceEnhancer StackTraceEnhancer { get; }
+		private readonly IJsonExceptionSerializationSettings _exceptionSerializationSettings;
+		private IStackTraceEnhancer StackTraceEnhancer { get; }
         
-        public JsonExceptionSerializer(IStackTraceEnhancer stackTraceEnhancer)
-	    {
+        public JsonExceptionSerializer(IStackTraceEnhancer stackTraceEnhancer, IJsonExceptionSerializationSettings exceptionSerializationSettings)
+        {
+	        _exceptionSerializationSettings = exceptionSerializationSettings;
 	        StackTraceEnhancer = stackTraceEnhancer;
-	    }
+        }
 
 	    /// <summary>
-	    /// Deserializes an exception from JSON, and uses the inheritance hiearchy embedded into the $type property in order to fall back to the
-	    /// first type up the hiearchy that successfully deserializes. 
+	    /// Deserializes an exception from JSON, and uses the inheritance hierarchy embedded into the $type property in order to fall back to the
+	    /// first type up the hierarchy that successfully deserializes. 
 	    /// </summary>
 	    /// <param name="json">The JSON to deserialize.</param>
 	    /// <returns>The deserialized exception.</returns>
 	    /// <exception cref="Newtonsoft.Json.JsonSerializationException">Thrown when the exception failed to deserialize.</exception>
 	    public Exception Deserialize(string json)
 	    {
-	        var ex = JsonConvert.DeserializeObject<Exception>(json, Settings);
+	        var ex = JsonConvert.DeserializeObject<Exception>(json, _exceptionSerializationSettings.SerializerSettings);
 
 	        if (ex == null)
 	            throw new JsonSerializationException("Failed to deserialize exception.");
@@ -77,7 +61,7 @@ namespace Gigya.Microdot.SharedLogic.Exceptions
 
 
         /// <summary>
-        /// Serializes and exception into JSON, and embeds the entire inheritance hiearchy of the exception into the $type property.
+        /// Serializes and exception into JSON, and embeds the entire inheritance hierarchy of the exception into the $type property.
         /// </summary>
         /// <param name="ex">The exception to serialize.</param>
         /// <returns>The JSON into which the exception was serialized.</returns>
@@ -98,7 +82,7 @@ namespace Gigya.Microdot.SharedLogic.Exceptions
                 current = current["InnerException"] is JObject inner ? inner : null;
             }
 
-			return JsonConvert.SerializeObject(root, Settings);
+			return JsonConvert.SerializeObject(root, _exceptionSerializationSettings.SerializerSettings);
 		}
     }
 }

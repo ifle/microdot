@@ -26,8 +26,10 @@ using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Text;
 using System.Threading.Tasks.Dataflow;
 using Gigya.Common.Contracts.Exceptions;
+using Gigya.Microdot.Interfaces;
 using Gigya.Microdot.Interfaces.Configuration;
 using Gigya.Microdot.Interfaces.Logging;
 using Gigya.Microdot.SharedLogic.Exceptions;
@@ -38,7 +40,7 @@ using Newtonsoft.Json.Linq;
 
 namespace Gigya.Microdot.Configuration.Objects
 {
-    public class ConfigObjectCreator
+    public class ConfigObjectCreator : IConfigObjectCreator
     {
 
         /// <summary>
@@ -56,7 +58,8 @@ namespace Gigya.Microdot.Configuration.Objects
         private string ValidationErrors { get; set; }
         private JObject LatestNode { get; set; }
         private JObject Empty { get; } = new JObject();
-        private DataAnnotationsValidator.DataAnnotationsValidator Validator { get; }
+        private DataAnnotationsValidator Validator { get; }
+        private bool isCreated = false;
 
         private readonly AggregatingHealthStatus healthStatus;
 
@@ -67,29 +70,32 @@ namespace Gigya.Microdot.Configuration.Objects
             ObjectType = objectType;
             ConfigCache = configCache;
             ConfigPath = GetConfigPath();
-            Validator = new DataAnnotationsValidator.DataAnnotationsValidator();
-
-            Create();
-            ConfigCache.ConfigChanged.LinkTo(new ActionBlock<ConfigItemsCollection>(c => Create()));
-            InitializeBroadcast();
             healthStatus = getAggregatedHealthCheck("Configuration");
-            healthStatus.RegisterCheck(ObjectType.Name, HealthCheck);
+            Validator = new DataAnnotationsValidator();
+
+            Init();
         }
 
+        private void Init()
+        {
+            Reload();
+            ConfigCache.ConfigChanged.LinkTo(new ActionBlock<ConfigItemsCollection>(c => Reload()));
+            InitializeBroadcast();
+            healthStatus.Register(ObjectType.Name, HealthCheck);
+        }
 
-        private HealthCheckResult HealthCheck()
+        private HealthMessage HealthCheck()
         {
             if (ValidationErrors != null)
             {
-                return HealthCheckResult.Unhealthy("The config object failed validation.\r\n" +
+                return new HealthMessage(Health.Unhealthy, "The config object failed validation.\r\n" +
                                                    $"ConfigObjectType={ObjectType.FullName}\r\n" +
                                                    $"ConfigObjectPath={ConfigPath}\r\n" +
                                                    $"ValidationErrors={ValidationErrors}");
             }
 
-            return HealthCheckResult.Healthy();
+            return new HealthMessage(Health.Healthy, "OK");
         }
-
 
         /// <summary>
         /// Gets the latest version of the configuration. This value is cached for quick retrieval. If the config object
@@ -103,6 +109,7 @@ namespace Gigya.Microdot.Configuration.Objects
             {
                 throw new ConfigurationException("The config object failed validation.", unencrypted: new Tags
                 {
+					// Pay attention, at least the ConfigurationVerificator class relying on these keys to extract details of validation errors during the load.
                     { "ConfigObjectType", ObjectType.FullName },
                     { "ConfigObjectPath", ConfigPath },
                     { "ValidationErrors", ValidationErrors }
@@ -112,6 +119,36 @@ namespace Gigya.Microdot.Configuration.Objects
             return Latest;
         }
 
+        public Func<T> GetTypedLatestFunc<T>() where T : class => () => GetLatest() as T;
+        public Func<T> GetChangeNotificationsFunc<T>() where T : class => () => ChangeNotifications as T;
+
+        public static bool IsConfigObject(Type service)
+        {
+            return service.IsClass && !service.IsAbstract && !service.IsInterface && typeof(IConfigObject).IsAssignableFrom(service);
+        }
+        
+        public dynamic GetLambdaOfGetLatest(Type configType)
+        {
+            return GetGenericFuncCompiledLambda(configType, nameof(GetTypedLatestFunc));
+        }
+
+        public dynamic GetLambdaOfChangeNotifications(Type configType)
+        {
+            return GetGenericFuncCompiledLambda(configType, nameof(GetChangeNotificationsFunc));
+        }
+
+        private dynamic GetGenericFuncCompiledLambda(Type configType, string functionName)
+        {//happens only once while loading, but can be optimized by creating Method info before sending to this function, if needed
+            MethodInfo func = typeof(ConfigObjectCreator).GetMethod(functionName).MakeGenericMethod(configType);
+            Expression instance = Expression.Constant(this);
+            Expression callMethod = Expression.Call(instance, func);
+            Type delegateType = typeof(Func<>).MakeGenericType(configType);
+            Type parentExpressionType = typeof(Func<>).MakeGenericType(delegateType);
+
+            dynamic lambda = Expression.Lambda(parentExpressionType, callMethod).Compile();
+
+            return lambda;
+        }
 
         private string GetConfigPath()
         {
@@ -129,7 +166,6 @@ namespace Gigya.Microdot.Configuration.Objects
 
             return configPath;
         }
-
 
         private void InitializeBroadcast()
         {
@@ -150,8 +186,7 @@ namespace Gigya.Microdot.Configuration.Objects
             SendChangeNotification = lambda.Compile();
         }
 
-
-        private void Create()
+        public void Reload()
         {
             var errors = new List<ValidationResult>();
             JObject config = null;
@@ -176,14 +211,13 @@ namespace Gigya.Microdot.Configuration.Objects
 
             if (config != null && errors.Any() == false)
             {
-                LatestNode = config;
-
                 try
                 {
-                    updatedConfig = LatestNode.ToObject(ObjectType);
+                    updatedConfig = config.ToObject(ObjectType);
                 }
-                catch (JsonException ex)
+                catch (Exception ex)
                 {
+                    // It is not only JsonException, as sometimes a custom deserializer capable to throw god knows what (including ProgrammaticException)
                     errors.Add(new ValidationResult("Failed to deserialize config object: " + HealthMonitor.GetMessages(ex)));
                 }
 
@@ -193,16 +227,27 @@ namespace Gigya.Microdot.Configuration.Objects
 
             if (errors.Any() == false)
             {
-                Latest = updatedConfig;
                 ValidationErrors = null;
                 UsageTracking.AddConfigObject(Latest, ConfigPath);
-
-                Log.Info(_ => _("A config object has been updated", unencryptedTags: new
+                if (isCreated)
                 {
-                    ConfigObjectType = ObjectType.FullName,
-                    ConfigObjectPath = ConfigPath
-                }));
+                    Log.Info(_ => _("A config object has been updated",
+                        unencryptedTags: new {
+                            ConfigObjectType  = ObjectType.FullName,
+                            ConfigObjectPath  = ConfigPath,
+                            OverallModifyTime = ConfigCache.LatestConfigFileModifyTime,
+                        },
+                        encryptedTags: new {
+                            Changes = DiffJObjects(LatestNode, config, new StringBuilder(), new Stack<string>()).ToString(),
+                        }));
+                }
+                else//It mean we are first time not need to send update messsage 
+                {
+                    isCreated = true;
+                }
 
+                LatestNode = config;
+                Latest = updatedConfig;
                 SendChangeNotification?.Invoke(Latest);
             }
             else
@@ -216,6 +261,53 @@ namespace Gigya.Microdot.Configuration.Objects
                     ValidationErrors
                 }));
             }
+        }
+
+
+        static StringBuilder DiffJObjects(JObject left, JObject right, StringBuilder sb, Stack<string> path)
+        {
+            var leftEnum = ((IEnumerable<KeyValuePair<string, JToken>>)left).OrderBy(_ => _.Key).GetEnumerator();
+            var rightEnum = ((IEnumerable<KeyValuePair<string, JToken>>)right).OrderBy(_ => _.Key).GetEnumerator();
+            bool moreLeft = leftEnum.MoveNext();
+            bool moreRight = rightEnum.MoveNext();
+            while (moreLeft || moreRight)
+            {
+                if (moreLeft && (!moreRight || leftEnum.Current.Key.CompareTo(rightEnum.Current.Key) < 0))
+                {
+                    sb.Append(string.Join(".", path.Append(leftEnum.Current.Key))).Append(":\t").Append(JsonConvert.SerializeObject(leftEnum.Current.Value)).AppendLine("\t-->\tnull");
+                    moreLeft = leftEnum.MoveNext();
+                }
+                else if (moreRight && (!moreLeft || leftEnum.Current.Key.CompareTo(rightEnum.Current.Key) > 0))
+                {
+                    sb.Append(string.Join(".", path.Append(rightEnum.Current.Key))).Append(":\tnull\t-->\t").AppendLine(JsonConvert.SerializeObject(rightEnum.Current.Value));
+                    moreRight = rightEnum.MoveNext();
+                }
+                else if (leftEnum.Current.Value.Type != rightEnum.Current.Value.Type)
+                {
+                    sb.Append(string.Join(".", path.Append(leftEnum.Current.Key))).Append(":\t").Append(JsonConvert.SerializeObject(leftEnum.Current.Value))
+                        .Append("\t-->\t").AppendLine(JsonConvert.SerializeObject(rightEnum.Current.Value));
+                    moreLeft = leftEnum.MoveNext();
+                    moreRight = rightEnum.MoveNext();
+                }
+                else if (leftEnum.Current.Value.Type != JTokenType.Object)
+                {
+                    if (!JToken.DeepEquals(leftEnum.Current.Value, rightEnum.Current.Value))
+                        sb.Append(string.Join(".", path.Append(leftEnum.Current.Key))).Append(":\t").Append(JsonConvert.SerializeObject(leftEnum.Current.Value))
+                            .Append("\t-->\t").AppendLine(JsonConvert.SerializeObject(rightEnum.Current.Value));
+                    moreLeft = leftEnum.MoveNext();
+                    moreRight = rightEnum.MoveNext();
+                }
+                else
+                {
+                    path.Push(leftEnum.Current.Key);
+                    DiffJObjects((JObject)leftEnum.Current.Value, (JObject)rightEnum.Current.Value, sb, path);
+                    path.Pop();
+                    moreLeft = leftEnum.MoveNext();
+                    moreRight = rightEnum.MoveNext();
+                }
+            }
+
+            return sb;
         }
     }
 }

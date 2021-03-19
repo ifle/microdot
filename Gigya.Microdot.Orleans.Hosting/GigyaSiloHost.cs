@@ -1,12 +1,13 @@
-#region Copyright 
+#region Copyright
+
 // Copyright 2017 Gigya Inc.  All rights reserved.
-// 
-// Licensed under the Apache License, Version 2.0 (the "License"); 
-// you may not use this file except in compliance with the License.  
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
 // IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -18,119 +19,162 @@
 // CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
-#endregion
 
-using System;
-using System.Reflection;
-using System.Threading.Tasks;
+#endregion Copyright
+
 using Gigya.Common.Contracts.Exceptions;
 using Gigya.Microdot.Hosting.HttpService;
-using Gigya.Microdot.Interfaces.Events;
 using Gigya.Microdot.Interfaces.Logging;
-using Gigya.Microdot.Orleans.Hosting.Events;
+using Gigya.Microdot.Orleans.Hosting.Logging;
 using Gigya.Microdot.SharedLogic;
-using Gigya.Microdot.SharedLogic.Measurement;
-using Metrics;
+using Gigya.Microdot.SharedLogic.Events;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Orleans;
-using Orleans.CodeGeneration;
-using Orleans.Providers;
-using Orleans.Runtime.Host;
+using Orleans.Hosting;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Gigya.Microdot.Orleans.Hosting
 {
-    public class GigyaSiloHost
+
+    public interface IOrleansConfigurator
     {
+        Task AfterOrleansStartup(IGrainFactory grainFactory);
+    }
+
+    public class GigyaSiloHost : IRequestListener
+    {
+        private readonly IOrleansToNinjectBinding _serviceProvider;
+        private readonly OrleansLogProvider _logProvider;
+        private readonly OrleansConfigurationBuilder _orleansConfigurationBuilder;
+        private readonly OrleansConfig _orleansConfig;
+        private readonly Func<IServiceProvider> _factoryServiceProvider;
         public static IGrainFactory GrainFactory { get; private set; }
-        private SiloHost Silo { get; set; }
-        private Exception BootstrapException { get; set; }
+        private Exception _startupTaskExceptions { get; set; }
         private Func<IGrainFactory, Task> AfterOrleansStartup { get; set; }
-        private Func<IGrainFactory, Task> BeforeOrleansShutdown { get; set; }
-        private Counter EventsDiscarded { get; }
         private ILog Log { get; }
-        private OrleansConfigurationBuilder ConfigBuilder { get; }
         private HttpServiceListener HttpServiceListener { get; }
-        private IEventPublisher<GrainCallEvent> EventPublisher { get; }        
+        private ServiceArguments _serviceArguments = new ServiceArguments();
 
-
-        public GigyaSiloHost(ILog log, OrleansConfigurationBuilder configBuilder,
-                             HttpServiceListener httpServiceListener, 
-                             IEventPublisher<GrainCallEvent> eventPublisher)
+        public GigyaSiloHost(
+            ILog log,
+            HttpServiceListener httpServiceListener,
+            IOrleansToNinjectBinding serviceProvider,
+            OrleansLogProvider logProvider,
+            OrleansConfigurationBuilder orleansConfigurationBuilder,
+            OrleansConfig orleansConfig,
+            Func<IServiceProvider> factoryServiceProvider,
+            ServiceArguments arguments,
+            IOrleansConfigurator orleansConfigurator)
         {
+            _serviceProvider = serviceProvider;
+            _logProvider = logProvider;
+            _orleansConfigurationBuilder = orleansConfigurationBuilder;
+            _orleansConfig = orleansConfig;
+            _factoryServiceProvider = factoryServiceProvider;
+            _orleansConfigurator = orleansConfigurator;
+            
             Log = log;
-            ConfigBuilder = configBuilder;
             HttpServiceListener = httpServiceListener;
-            EventPublisher = eventPublisher;            
-
-            if (DelegatingBootstrapProvider.OnInit != null || DelegatingBootstrapProvider.OnClose != null)
-                throw new InvalidOperationException("DelegatingBootstrapProvider is already in use.");
-
-            DelegatingBootstrapProvider.OnInit = BootstrapInit;
-            DelegatingBootstrapProvider.OnClose = BootstrapClose;
-
-            EventsDiscarded = Metric.Context("GigyaSiloHost").Counter("GrainCallEvents discarded", Unit.Items);
+            this.arguments = arguments;
         }
 
-        public void Start(Func<IGrainFactory, Task> afterOrleansStartup = null,
-            Func<IGrainFactory, Task> beforeOrleansShutdown = null)
+        private ISiloHost _siloHost;
+        private readonly ServiceArguments arguments;
+        private readonly IOrleansConfigurator _orleansConfigurator;
+
+        public Task Listen()
+        {
+            this.Start(this.arguments);
+            
+            return null;
+        }
+
+        public void Start(ServiceArguments serviceArguments, Func<IGrainFactory, Task> afterOrleansStartup = null)
         {
             AfterOrleansStartup = afterOrleansStartup;
-            BeforeOrleansShutdown = beforeOrleansShutdown;
+            _serviceArguments = serviceArguments;
 
+            Log.Info(_ => _("Build Bridges, Not Silos!"));
             Log.Info(_ => _("Starting Orleans silo..."));
 
-            Silo = new SiloHost(CurrentApplicationInfo.HostName, ConfigBuilder.ClusterConfiguration)
+            var builder = _orleansConfigurationBuilder.GetBuilder()
+              .UseServiceProviderFactory(o =>
+              {
+                  _serviceProvider.ConfigureServices(o);
+                  return _factoryServiceProvider();
+
+              })
+              .ConfigureLogging(op => op.AddProvider(_logProvider))
+              .AddStartupTask(StartupTask);
+
+            if (_orleansConfig.EnableInterceptor)
+                builder.AddIncomingGrainCallFilter<MicrodotIncomingGrainCallFilter>()
+                    .AddOutgoingGrainCallFilter(async o =>
+                    {
+                        TracingContext.SpanStartTime = DateTimeOffset.UtcNow;
+                        await o.Invoke();
+                    });
+
+            _siloHost = builder.Build();
+
+            try
             {
-                Type = ConfigBuilder.SiloType
-            };
-            Silo.InitializeOrleansSilo();
+                int cancelAfter = _serviceArguments.InitTimeOutSec ?? 60;
+                var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(cancelAfter)).Token;
+                var forceCancel = new CancellationTokenSource(TimeSpan.FromSeconds(cancelAfter + 10)).Token;
 
-            
-            bool siloStartedSuccessfully = Silo.StartOrleansSilo(false);
+                _siloHost.StartAsync(cancel).Wait(forceCancel);
+            }
+            catch (Exception e)
+            {
+                throw new ProgrammaticException("Failed to start Orleans silo", unencrypted: new Tags { { "siloName", CurrentApplicationInfo.HostName } }, innerException: e);
+            }
 
-            if (siloStartedSuccessfully)
-                Log.Info(_ => _("Successfully started Orleans silo", unencryptedTags: new { siloName = Silo.Name, siloType = Silo.Type }));
-            else if (BootstrapException != null)
-                throw new ProgrammaticException("Failed to start Orleans silo due to an exception thrown in the bootstrap method.", unencrypted: new Tags { { "siloName", Silo.Name }, { "siloType", Silo.Type.ToString() } }, innerException: BootstrapException);
-            else
-                throw new ProgrammaticException("Failed to start Orleans silo", unencrypted: new Tags { { "siloName", Silo.Name }, { "siloType", Silo.Type.ToString() } });
+            if (_startupTaskExceptions != null)
+                throw new ProgrammaticException("Failed to start Orleans silo due to an exception thrown in the bootstrap method.", unencrypted: new Tags { { "siloName", CurrentApplicationInfo.HostName } }, innerException: _startupTaskExceptions);
+
+            Log.Info(_ => _("Successfully started Orleans silo", unencryptedTags: new { siloName = CurrentApplicationInfo.HostName }));
+
+            _orleansConfigurator.AfterOrleansStartup(_siloHost.Services.GetService<IGrainFactory>());
+            Log.Info(_ => _("afterOrleansStartup done", unencryptedTags: new { siloName = CurrentApplicationInfo.HostName }));
+
+            HttpServiceListener.StartGettingTraffic();
+            Log.Info(_ => _("start getting traffic", unencryptedTags: new { siloName = CurrentApplicationInfo.HostName }));
         }
 
-
-        
         public void Stop()
         {
-            HttpServiceListener.Dispose();
+            if (_serviceArguments == null)
+                return;
 
-            if (Silo != null && Silo.IsStarted)
-                Silo.StopOrleansSilo();
+            var cancelAfter = new CancellationTokenSource(TimeSpan.FromSeconds(_serviceArguments.OnStopWaitTimeSec.Value)).Token;
 
             try
             {
-                GrainClient.Uninitialize();
+                HttpServiceListener?.Dispose();
             }
-            catch (Exception exc)
+            catch (Exception e)
             {
-                Log.Warn("Exception Uninitializing grain client", exception: exc);
+                Log.Warn((m) => m("Failed to close HttpServiceListener ", exception: e));
             }
 
+            try
+            {
+                _siloHost?.StopAsync(cancelAfter).Wait(cancelAfter);
+                _siloHost?.Dispose();
+            }
+            catch (Exception e)
+            {
+                Log.Error((m) => m(" Silo failed to StopAsync", exception: e));
+            }
         }
 
-        private async Task BootstrapInit(IProviderRuntime providerRuntime)
+        private async Task StartupTask(IServiceProvider serviceProvider, CancellationToken arg2)
         {
-            GrainTaskScheduler = TaskScheduler.Current;
-            GrainFactory = providerRuntime.GrainFactory;            
-            providerRuntime.SetInvokeInterceptor(Interceptor);
-
-            try
-            {
-                if (AfterOrleansStartup != null)
-                    await AfterOrleansStartup(GrainFactory);
-            }
-            catch (Exception ex)
-            {
-                BootstrapException = ex;
-                throw;
-            }
+            
 
             try
             {
@@ -138,68 +182,15 @@ namespace Gigya.Microdot.Orleans.Hosting
             }
             catch (Exception ex)
             {
-                BootstrapException = ex;
-                Log.Error("Failed to start HttpServiceListener",exception:ex);                
+                _startupTaskExceptions = ex;
+                Log.Error("Failed to start HttpServiceListener", exception: ex);
                 throw;
             }
         }
 
-
-        public TaskScheduler GrainTaskScheduler { get; set; }
-
-
-        private async Task<object> Interceptor(MethodInfo targetMethod, InvokeMethodRequest request, IGrain target, IGrainMethodInvoker invoker)
+        public void Dispose()
         {
-            if (targetMethod == null)
-                throw new ArgumentNullException(nameof(targetMethod));
-
-            var declaringNameSpace = targetMethod.DeclaringType?.Namespace;
-            
-            // Do not intercept Orleans grains or other grains which should not be included in statistics.
-            if(targetMethod.DeclaringType.GetCustomAttribute<ExcludeGrainFromStatisticsAttribute>()!=null ||
-               declaringNameSpace?.StartsWith("Orleans") == true)
-                 return await invoker.Invoke(target, request);
-
-            RequestTimings.GetOrCreate(); // Ensure request timings is created here and not in the grain call.
-
-            RequestTimings.Current.Request.Start();
-            Exception ex = null;
-
-            try
-            {
-                return await invoker.Invoke(target, request);
-            }
-            catch (Exception e)
-            {
-                ex = e;
-                throw;
-            }
-            finally
-            {
-                RequestTimings.Current.Request.Stop();
-                var grainEvent = EventPublisher.CreateEvent();
-                grainEvent.TargetType = targetMethod.DeclaringType?.FullName;
-                grainEvent.TargetMethod = targetMethod.Name;
-                grainEvent.Exception = ex;
-                grainEvent.ErrCode = ex != null ? null : (int?)0;
-
-                try
-                {
-                    EventPublisher.TryPublish(grainEvent);
-                }
-                catch (Exception)
-                {
-                    EventsDiscarded.Increment();
-                }
-            }
-        }
-
-        private async Task BootstrapClose()
-        {
-            if (BeforeOrleansShutdown != null)
-                await BeforeOrleansShutdown(GrainFactory);
+            // TODO: implement
         }
     }
-
-
 }

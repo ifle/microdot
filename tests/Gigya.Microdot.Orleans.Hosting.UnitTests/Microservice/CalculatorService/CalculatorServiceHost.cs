@@ -20,64 +20,66 @@
 // POSSIBILITY OF SUCH DAMAGE.
 #endregion
 
-using System.Diagnostics;
-using Gigya.Microdot.Fakes;
-using Gigya.Microdot.Interfaces;
-using Gigya.Microdot.Interfaces.Events;
-using Gigya.Microdot.Interfaces.Logging;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Gigya.Microdot.Common.Tests;
+using Gigya.Microdot.Fakes.KernelUtils;
+using Gigya.Microdot.Hosting.Environment;
+using Gigya.Microdot.Hosting.Validators;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.Ninject;
+using Gigya.Microdot.Orleans.Hosting.UnitTests.Microservice.WarmupTestService;
 using Gigya.Microdot.Orleans.Ninject.Host;
+using Gigya.Microdot.SharedLogic;
+using Gigya.Microdot.SharedLogic.HttpService;
 using Ninject;
-using Ninject.Syntax;
+using Orleans;
 
 namespace Gigya.Microdot.Orleans.Hosting.UnitTests.Microservice.CalculatorService
 {
-    public class FakesLoggersModules : ILoggingModule
-    {
-        private readonly bool _useHttpLog;
-
-        public FakesLoggersModules(bool useHttpLog)
-        {
-            _useHttpLog = useHttpLog;
-        }
-
-        public void Bind(IBindingToSyntax<ILog> logBinding, IBindingToSyntax<IEventPublisher> eventPublisherBinding)
-        {
-            if(_useHttpLog)
-                logBinding.To<HttpLog>();
-            else
-                logBinding.To<ConsoleLog>();
-
-            eventPublisherBinding.To<SpyEventPublisher>().InSingletonScope();
-        }
-    }
-
     public class CalculatorServiceHost : MicrodotOrleansServiceHost
     {
-        private ILoggingModule LoggingModule { get; }
-
-        public CalculatorServiceHost() : this(true)
-        { }
-
-
-        public CalculatorServiceHost(bool useHttpLog)
-        {            
-            LoggingModule = new FakesLoggersModules(useHttpLog);
-        }
-
-
-        protected override string ServiceName => "TestService";
-
+        public override string ServiceName => "test";
 
         public override ILoggingModule GetLoggingModule()
         {
-            return LoggingModule;
+            return new FakesLoggersModules();
         }
 
-        protected override void Configure(IKernel kernel, OrleansCodeConfig commonConfig)
+        public IKernel Kernel;
+
+        protected override void PreConfigure(IKernel kernel, ServiceArguments Arguments)
         {
-            kernel.Rebind<IMetricsInitializer>().To<MetricsInitializerFake>();
-            kernel.Rebind<ILog>().ToConstant(new HttpLog(TraceEventType.Warning));
+            var env = new HostEnvironment(new TestHostEnvironmentSource());
+            kernel.Rebind<IEnvironment>().ToConstant(env).InSingletonScope();
+            kernel.Rebind<CurrentApplicationInfo>().ToConstant(env.ApplicationInfo).InSingletonScope();
+
+            base.PreConfigure(kernel, Arguments);
+            kernel.Rebind<ServiceValidator>().To<MockServiceValidator>().InSingletonScope();
+            kernel.Rebind<ISingletonDependency>().To<SingletonDependency>().InSingletonScope();
+            Func<GrainLoggingConfig> writeGrainLog = () => new GrainLoggingConfig{LogMicrodotGrains = true, LogRatio = 1, LogServiceGrains = true, LogOrleansGrains = true};
+            kernel.Rebind<Func<GrainLoggingConfig>>().ToConstant(writeGrainLog);
+            kernel.Rebind<ICertificateLocator>().To<DummyCertificateLocator>().InSingletonScope();
+            kernel.RebindForTests();
+            Kernel = kernel;
+
+        }
+
+        protected override Task AfterOrleansStartup(IGrainFactory grainFactory)
+        {
+            if (grainFactory == null) throw new NullReferenceException("AfterOrleansStartup no grainFactory");
+            return base.AfterOrleansStartup(grainFactory);
+        }
+
+        public class MockServiceValidator : ServiceValidator
+        {
+
+            public MockServiceValidator()
+                : base(new List<IValidator>().ToArray())
+            {
+
+            }
         }
     }
 }

@@ -20,16 +20,18 @@
 // POSSIBILITY OF SUCH DAMAGE.
 #endregion
 
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
 using Gigya.Common.Contracts.Exceptions;
-using Gigya.Microdot.Interfaces.HttpService;
+using Gigya.Microdot.SharedLogic.HttpService;
 
 namespace Gigya.Microdot.ServiceDiscovery
 {
     public delegate Task<bool> ReachabilityChecker(IEndPointHandle remoteHost);
 
+    [Obsolete("Use IDiscovery instead")]
     public interface IServiceDiscovery
     {
         /// <summary>

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Net.Http;
 using System.Threading.Tasks;
 
 using FluentAssertions;
@@ -7,12 +8,11 @@ using FluentAssertions;
 using Gigya.Microdot.Fakes;
 using Gigya.Microdot.Hosting.HttpService;
 using Gigya.Microdot.Interfaces;
-using Gigya.Microdot.Interfaces.HttpService;
 using Gigya.Microdot.Ninject;
 using Gigya.Microdot.ServiceProxy;
 using Gigya.Microdot.SharedLogic;
 using Gigya.Microdot.SharedLogic.Exceptions;
-using Gigya.Microdot.Testing;
+using Gigya.Microdot.SharedLogic.HttpService;
 using Gigya.Microdot.Testing.Shared;
 using Gigya.Microdot.UnitTests.ServiceProxyTests;
 
@@ -26,24 +26,28 @@ using Shouldly;
 
 namespace Gigya.Microdot.UnitTests.ServiceListenerTests
 {
-    [TestFixture]
+    [TestFixture,Parallelizable(ParallelScope.Fixtures)]
     public class PortsAllocationTests
     {
         [Test]
         public async Task For_ServiceProxy_TakeDefaultSlot()
         {
-            var kernel = SetUpKernel(new ServiceArguments(slotNumber: 5));
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var handlerMock = new MockHttpMessageHandler();
+                handlerMock.When("*").Respond(req =>
+                {
+                    req.RequestUri.Port.ShouldBe(40001);
+                    return HttpResponseFactory.GetResponse(content: "null");
+                });
+                return handlerMock;
+            };
+
+            var kernel = SetUpKernel(new ServiceArguments(slotNumber: 5), messageHandlerFactory: messageHandlerFactory);
             var serviceProxyFunc = kernel.Get<Func<string, ServiceProxyProvider>>();
             var serviceProxy = serviceProxyFunc(TestingKernel<ConsoleLog>.APPNAME);
-            var handlerMock = new MockHttpMessageHandler();
-            handlerMock.When("*").Respond(req =>
-            {
-                req.RequestUri.Port.ShouldBe(40001);
-                return HttpResponseFactory.GetResponse(content: "null");
-            });
 
-            serviceProxy.HttpMessageHandler = handlerMock;
-            await serviceProxy.Invoke(new HttpServiceRequest("myMethod", new Dictionary<string, object>()), typeof(int?));
+            await serviceProxy.Invoke(new HttpServiceRequest("myMethod", null, new Dictionary<string, object>()), typeof(int?));
         }
 
         
@@ -58,9 +62,10 @@ namespace Gigya.Microdot.UnitTests.ServiceListenerTests
             args.SlotNumber.Should().Be(5);
         }
 
-        private TestingKernel<ConsoleLog> SetUpKernel(ServiceArguments serviceArguments, 
+        private TestingKernel<ConsoleLog> SetUpKernel(ServiceArguments serviceArguments,
             bool isSlotMode=true,
-            bool withDefault=true)
+            bool withDefault=true,
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = null)
         {
             var mockConfig = new Dictionary<string, string>
             {
@@ -78,6 +83,7 @@ namespace Gigya.Microdot.UnitTests.ServiceListenerTests
                     k.Load<MicrodotHostingModule>();
                     k.Rebind<ServiceArguments>().ToConstant(serviceArguments);
                     k.Rebind<IServiceInterfaceMapper>().ToConstant(new IdentityServiceInterfaceMapper(typeof(IDemoService)));
+                    k.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory ?? (_ => new MockHttpMessageHandler()));
                 },
                 mockConfig);
         }
@@ -92,7 +98,7 @@ namespace Gigya.Microdot.UnitTests.ServiceListenerTests
             serviceEndpointDefinition.HttpPort.Should().Be(40005);
             serviceEndpointDefinition.SiloGatewayPort.Should().Be(41005);
             serviceEndpointDefinition.SiloNetworkingPort.Should().Be(42005);
-            serviceEndpointDefinition.SiloNetworkingPortOfPrimaryNode.Should().Be(42001);
+            serviceEndpointDefinition.BasePortOfPrimarySilo.Should().Be(42001);
             ((IMetricsSettings)serviceEndpointDefinition).MetricsPort.Should().Be(43005);
         }
 
@@ -107,7 +113,7 @@ namespace Gigya.Microdot.UnitTests.ServiceListenerTests
             serviceEndpointDefinition.HttpPort.Should().Be(40001);
             serviceEndpointDefinition.SiloGatewayPort.Should().Be(41001);
             serviceEndpointDefinition.SiloNetworkingPort.Should().Be(42001);
-            serviceEndpointDefinition.SiloNetworkingPortOfPrimaryNode.Should().Be(42001);
+            serviceEndpointDefinition.BasePortOfPrimarySilo.Should().Be(42001);
             ((IMetricsSettings)serviceEndpointDefinition).MetricsPort.Should().Be(43001);
         }
 
@@ -126,15 +132,17 @@ namespace Gigya.Microdot.UnitTests.ServiceListenerTests
         [Test]        
         public void IsSlotModeFlag_Working()
         {
-            var kernel = SetUpKernel(new ServiceArguments(),false);
+             int basePort = 5555;
+            var kernel = SetUpKernel(new ServiceArguments(){BasePortOfPrimarySilo = basePort},false);
 
             var serviceEndpointDefinition = kernel.Get<IServiceEndPointDefinition>();
 
-            serviceEndpointDefinition.HttpPort.Should().Be(5555);
-            serviceEndpointDefinition.SiloGatewayPort.Should().Be(5556);
-            serviceEndpointDefinition.SiloNetworkingPort.Should().Be(5557);
-            serviceEndpointDefinition.SiloNetworkingPortOfPrimaryNode.Should().Be(5557);            
-            ((IMetricsSettings)serviceEndpointDefinition).MetricsPort.Should().Be(5558);
+            serviceEndpointDefinition.HttpPort.Should().Be(basePort);
+            serviceEndpointDefinition.BasePortOfPrimarySilo.Should().Be(basePort);            
+
+            serviceEndpointDefinition.SiloGatewayPort.Should().Be(basePort+1);
+            serviceEndpointDefinition.SiloNetworkingPort.Should().Be(basePort+2);
+            ((IMetricsSettings)serviceEndpointDefinition).MetricsPort.Should().Be(basePort+3);
         }
 
     }

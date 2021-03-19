@@ -23,7 +23,7 @@
 using System;
 using System.Collections.Generic;
 using Gigya.Common.Contracts.HttpService;
-using Gigya.Microdot.Interfaces.HttpService;
+using Gigya.Microdot.SharedLogic.HttpService;
 
 namespace Gigya.Microdot.Hosting.HttpService
 {
@@ -37,16 +37,25 @@ namespace Gigya.Microdot.Hosting.HttpService
 		/// </summary>
         bool UseSecureChannel { get; }
 
+        /// <summary>
+        /// Controls the client certificate verification logic
+        /// </summary>
+        ClientCertificateVerificationMode ClientCertificateVerification { get; }
+
         int SiloGatewayPort { get; }
 
         int SiloNetworkingPort { get; }
 
-        // Secondary nodes without ZooKeeper are only supported on a developer's machine (or unit tests), so
-        // localhost and the original base port are always assumed (since the secondary nodes must use a
-        // base port override to avoid port conflicts).
-        int SiloNetworkingPortOfPrimaryNode { get; }
+        /// <summary>
+        /// Secondary nodes without ZooKeeper are only supported on a developer's machine (or unit tests).
+        /// In case the primary node runs on a custom port (i.e. uses BasePortOverride), secondary nodes need to be able
+        /// to know what port it's running at. Use this property.
+        ///</summary> 
+        int? BasePortOfPrimarySilo { get; }
 
-        int HttpPort { get; }
+        int? HttpPort { get; }
+
+        int? HttpsPort { get; }
 
         /// <summary>
         /// Provides a friendly name for each service, keyed by the type of the service interface (the one decorated
@@ -54,7 +63,9 @@ namespace Gigya.Microdot.Hosting.HttpService
         /// </summary>
         Dictionary<Type, string> ServiceNames { get; }
 
-		/// <summary>
+        int SiloDashboardPort { get; }
+
+        /// <summary>
 		/// Determines which service method should be called for the specified <see cref="InvocationTarget"/>.
 		/// </summary>
 		/// <param name="target">The invocation target specified by the remote client.</param>

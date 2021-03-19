@@ -25,19 +25,19 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Gigya.Microdot.Interfaces.Events;
-using Gigya.Microdot.Interfaces.HttpService;
 using Gigya.Microdot.SharedLogic.Events;
+using Gigya.Microdot.SharedLogic.HttpService;
 
 namespace Gigya.Microdot.Hosting.Events
 {
     public class ServiceCallEvent : StatsEvent
     {
-   
+
         protected Regex ExcludeStackTraceForErrorCodeRegex => Configuration.ExcludeStackTraceRule;
 
         internal double? ActualTotalTime { get; set; }
 
-      
+
         public override double? TotalTime => ActualTotalTime;
 
         public override string EventType => EventConsts.ServerReqType;
@@ -60,35 +60,66 @@ namespace Gigya.Microdot.Hosting.Events
         [EventField(EventConsts.targetMethod)]
         public string ServiceMethod { get; set; }
 
+        [EventField(EventConsts.protocolSchema)]
+        public string ServiceMethodSchema { get; set; }
+
         /// <summary>  Sensitive Service method arguments </summary>
         [EventField("params", Encrypt = true)]
-        public IEnumerable<KeyValuePair<string, string>> EncryptedServiceMethodArguments => LazyEncryptedRequestParams.GetValue(this);
+        public IEnumerable<KeyValuePair<string, object>> EncryptedServiceMethodArguments => LazyEncryptedRequestParams.GetValue(this);
 
         /// <summary> NonSensitive Service method arguments </summary>
 
-        [EventField("params", Encrypt = false)]
-        public IEnumerable<KeyValuePair<string, string>> UnencryptedServiceMethodArguments => LazyUnencryptedRequestParams.GetValue(this);
+        [EventField("params", Encrypt = false, TruncateIfLong = true)]
+        public IEnumerable<KeyValuePair<string, object>> UnencryptedServiceMethodArguments => LazyUnencryptedRequestParams.GetValue(this);
 
+        public double? ClientResponseTime { get; set; }
 
-        private readonly SharedLogic.Utils.Lazy<List<KeyValuePair<string, string>>, ServiceCallEvent> LazyEncryptedRequestParams = new SharedLogic.Utils.Lazy<List<KeyValuePair<string, string>>, ServiceCallEvent>(this_ => this_.GetRequestParams(Sensitivity.Sensitive).ToList());
-        private readonly SharedLogic.Utils.Lazy<List<KeyValuePair<string, string>>, ServiceCallEvent> LazyUnencryptedRequestParams = new SharedLogic.Utils.Lazy<List<KeyValuePair<string, string>>, ServiceCallEvent>(this_ => this_.GetRequestParams(Sensitivity.NonSensitive).ToList());
+        /// <summary> The time, measured on response to client </summary>
+        [EventField("stats.client.response.time")]
+        public virtual double? ClientResponseTimeIfNeeded => ClientResponseTime >= Configuration.MinResponseTimeForLog ? ClientResponseTime : null;
+
+        [EventField(EventConsts.SuppressCaching)]
+        public CacheSuppress? SuppressCaching { get; set; }  
+
+        private readonly SharedLogic.Utils.Lazy<List<KeyValuePair<string, object>>, ServiceCallEvent> LazyEncryptedRequestParams = new SharedLogic.Utils.Lazy<List<KeyValuePair<string, object>>, ServiceCallEvent>(this_ => this_.GetRequestParams(Sensitivity.Sensitive).ToList());
+        private readonly SharedLogic.Utils.Lazy<List<KeyValuePair<string, object>>, ServiceCallEvent> LazyUnencryptedRequestParams = new SharedLogic.Utils.Lazy<List<KeyValuePair<string, object>>, ServiceCallEvent>(this_ => this_.GetRequestParams(Sensitivity.NonSensitive).ToList());
 
 
         public IEnumerable<Param> Params { get; set; }
 
+        [EventField(EventConsts.RecvDateTicks)]
+        public long RecvDateTicks { get; set; }
 
-        private IEnumerable<KeyValuePair<string, string>> GetRequestParams(Sensitivity sensitivity)
+        [EventField(EventConsts.ReqStartupDeltaTicks)]
+        public long ReqStartupDeltaTicks { get; set; }
+
+        [EventField(EventConsts.TimeFromLastReq)]
+        public long TimeFromLastReq { get; set; }
+
+        [EventField(EventConsts.OutstandingRecvRequests)]
+        public long? OutstandingRecvRequests { get; set; }
+
+        [EventField(EventConsts.CollectionCountGen0)]
+        public int? CollectionCountGen0 { get; set; }
+
+        [EventField(EventConsts.CollectionCountGen1)]
+        public int? CollectionCountGen1 { get; set; }
+
+        [EventField(EventConsts.CollectionCountGen2)]
+        public int? CollectionCountGen2 { get; set; }
+
+        private IEnumerable<KeyValuePair<string, object>> GetRequestParams(Sensitivity sensitivity)
         {
-            
-            if (!Configuration.ExcludeParams && Params != null)
-            {
-                foreach (var param in Params.Where(param => param.Value != null && param.Sensitivity == sensitivity))
-                {
-                    var val = param.Value.Substring(0, Math.Min(param.Value.Length, Configuration.ParamTruncateLength));
 
-                    yield return new KeyValuePair<string, string>(param.Name, val);
-                }
+            if (Params != null)
+            {
+                return Params.Where(param => !Configuration.ExcludeParams && Params != null)
+                               .Where(param => param.Value != null && param.Sensitivity == sensitivity)
+                               .Select(_ => new KeyValuePair<string, object>(_.Name, _.Value));
             }
+
+            return Enumerable.Empty<KeyValuePair<string, object>>();
+
         }
     }
 }

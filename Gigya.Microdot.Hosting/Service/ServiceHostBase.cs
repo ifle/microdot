@@ -23,70 +23,89 @@
 using System;
 using System.Diagnostics;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.ServiceProcess;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Gigya.Common.Contracts.Exceptions;
+using Gigya.Microdot.Configuration;
+using Gigya.Microdot.Hosting.HttpService;
+using Gigya.Microdot.Interfaces.Configuration;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.SharedLogic;
-
-
-[assembly: InternalsVisibleTo("LINQPadQuery")]
+using Gigya.Microdot.SharedLogic.SystemWrappers;
 
 namespace Gigya.Microdot.Hosting.Service
 {
+    [ConfigurationRoot("Microdot.Hosting", RootStrategy.ReplaceClassNameWithPath)]
+    public class MicrodotHostingConfig : IConfigObject
+    {
+        public bool FailServiceStartOnConfigError = true;
+        public bool ExtendedDelaysTimeLogging = true;
+    }
+
     public abstract class ServiceHostBase : IDisposable
     {
         private bool disposed;
+        private object syncRoot = new object();
+
+        public abstract string ServiceName { get; }
 
         public ServiceArguments Arguments { get; private set; }
 
         private DelegatingServiceBase WindowsService { get; set; }
         private ManualResetEvent StopEvent { get; }
-        private TaskCompletionSource<object> ServiceStartedEvent { get; set; }
+        protected TaskCompletionSource<object> ServiceStartedEvent { get; set; }
+        private TaskCompletionSource<StopResult> ServiceGracefullyStopped { get; set; }
         private Process MonitoredShutdownProcess { get; set; }
-        private readonly string _serviceName;
-       
-        /// <summary>
-        /// The name of the service. This will be globally accessible from <see cref="CurrentApplicationInfo.Name"/>.
-        /// </summary>
-        protected virtual string ServiceName => _serviceName;
+        protected ICrashHandler CrashHandler { get; set; }
 
-        /// <summary>
-        /// Version of underlying infrastructure framework. This will be globally accessible from <see cref="CurrentApplicationInfo.InfraVersion"/>.
-        /// </summary>
-        protected virtual Version InfraVersion => null;
+        public virtual Version InfraVersion { get; }
 
-        protected ServiceHostBase()
+        private IRequestListener requestListener;
+
+        public bool? FailServiceStartOnConfigError { get; set; } = null;
+
+        public ServiceHostBase()
         {
             if (IntPtr.Size != 8)
                 throw new Exception("You must run in 64-bit mode. Please make sure you unchecked the 'Prefer 32-bit' checkbox from the build section of the project properties.");
 
+
             StopEvent = new ManualResetEvent(true);
             ServiceStartedEvent = new TaskCompletionSource<object>();
+            ServiceGracefullyStopped = new TaskCompletionSource<StopResult>();
+            ServiceGracefullyStopped.SetResult(StopResult.None);
+        }
 
-            _serviceName = GetType().Name;
 
-         
-            if (_serviceName.EndsWith("Host") && _serviceName.Length > 4)
-                _serviceName = _serviceName.Substring(0, _serviceName.Length - 4);
+
+        protected virtual void OnStop()
+        {
+
         }
 
         /// <summary>
-        /// Start the service, autodetecting between Windows service and command line. Always blocks until service is stopped.
+        /// Start the service, auto detecting between Windows service and command line. Always blocks until service is stopped.
         /// </summary>
         public void Run(ServiceArguments argumentsOverride = null)
         {
-            Arguments = argumentsOverride ?? new ServiceArguments(Environment.GetCommandLineArgs().Skip(1).ToArray());
-            CurrentApplicationInfo.Init(ServiceName, Arguments.InstanceName, InfraVersion);
+            ServiceGracefullyStopped = new TaskCompletionSource<StopResult>();
 
-            if (Arguments.ProcessorAffinity != null)
+            try {
+                Arguments = argumentsOverride ?? new ServiceArguments(System.Environment.GetCommandLineArgs().Skip(1).ToArray());
+            }
+            catch (ArgumentException ex)
             {
-                int processorAffinityMask = 0;
+                Console.WriteLine(ex.Message);
+                Console.WriteLine(ServiceArguments.GetHelpDocumentation());
+                return;
+            }
 
-                foreach (var cpuId in Arguments.ProcessorAffinity)
-                    processorAffinityMask |= 1 << cpuId;
-
-                Process.GetCurrentProcess().ProcessorAffinity = new IntPtr(processorAffinityMask);
+            if (argumentsOverride == null && ServiceArguments.IsHelpRequired(System.Environment.GetCommandLineArgs()))
+            {
+                Console.WriteLine(ServiceArguments.GetHelpDocumentation());
+                return;
             }
 
             if (Arguments.ServiceStartupMode == ServiceStartupMode.WindowsService)
@@ -99,22 +118,46 @@ namespace Gigya.Microdot.Hosting.Service
 
                 ServiceBase.Run(WindowsService); // This calls OnWindowsServiceStart() on a different thread and blocks until the service stops.
             }
+            else if (Arguments.ServiceStartupMode == ServiceStartupMode.VerifyConfigurations)
+            {
+                OnVerifyConfiguration();
+            }
             else
             {
-                OnStart();
-
                 if (Arguments.ShutdownWhenPidExits != null)
                 {
+                    try
+                    {
+                        MonitoredShutdownProcess = Process.GetProcessById(Arguments.ShutdownWhenPidExits.Value);
+                    }
+                    catch (ArgumentException e)
+                    {
+                        Console.WriteLine($"Service cannot start because monitored PID {Arguments.ShutdownWhenPidExits} is not running. Exception: {e}");
+                        System.Environment.ExitCode = 1;
+                        ServiceGracefullyStopped.SetResult(StopResult.None);
+                        return;
+                    }
+
                     Console.WriteLine($"Will perform graceful shutdown when PID {Arguments.ShutdownWhenPidExits} exits.");
-                    MonitoredShutdownProcess = Process.GetProcessById(Arguments.ShutdownWhenPidExits.Value);
                     MonitoredShutdownProcess.Exited += (s, a) =>
                     {
                         Console.WriteLine($"PID {Arguments.ShutdownWhenPidExits} has exited, shutting down...");
                         Stop();
                     };
+
                     MonitoredShutdownProcess.EnableRaisingEvents = true;
                 }
 
+                try
+                {
+                    OnStart();
+                }
+                catch (Exception e)
+                {
+                    ServiceStartedEvent.TrySetException(e);
+
+                    throw;
+                }
 
                 if (Arguments.ServiceStartupMode == ServiceStartupMode.CommandLineInteractive)
                 {
@@ -140,18 +183,18 @@ namespace Gigya.Microdot.Hosting.Service
                     }
 
                     Task.Factory.StartNew(() =>
-                             {
-                                 while (true)
-                                 {
-                                     var key = Console.ReadKey(true);
+                    {
+                        while (true)
+                        {
+                            var key = Console.ReadKey(true);
 
-                                     if (key.Key == ConsoleKey.S && key.Modifiers == ConsoleModifiers.Alt)
-                                     {
-                                         Stop();
-                                         break;
-                                     }
-                                 }
-                             }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                            if (key.Key == ConsoleKey.S && key.Modifiers == ConsoleModifiers.Alt)
+                            {
+                                Stop();
+                                break;
+                            }
+                        }
+                    }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
                 }
                 else
                 {
@@ -163,9 +206,16 @@ namespace Gigya.Microdot.Hosting.Service
                 StopEvent.WaitOne();
 
                 Console.WriteLine("   ***   Shutting down...   ***   ");
-                Task.Run(() => OnStop()).Wait(Arguments.OnStopWaitTime ?? TimeSpan.FromSeconds(10));
-             
+
+                var maxShutdownTime = TimeSpan.FromSeconds((Arguments.OnStopWaitTimeSec ?? 0) + (Arguments.ServiceDrainTimeSec ?? 0));
+                bool isServiceGracefullyStopped = Task.Run(() => OnStop()).Wait(maxShutdownTime);
+
+                if (isServiceGracefullyStopped == false)
+                    Console.WriteLine($"   ***  Service failed to stop gracefully in the allotted time ({maxShutdownTime}), continuing with forced shutdown.   ***   ");
+
                 ServiceStartedEvent = new TaskCompletionSource<object>();
+
+                ServiceGracefullyStopped.SetResult(isServiceGracefullyStopped ? StopResult.Graceful : StopResult.Force);
                 MonitoredShutdownProcess?.Dispose();
 
                 if (Arguments.ServiceStartupMode == ServiceStartupMode.CommandLineInteractive)
@@ -188,6 +238,67 @@ namespace Gigya.Microdot.Hosting.Service
             }
         }
 
+        protected abstract void OnVerifyConfiguration();
+
+        protected void VerifyConfiguration(ConfigurationVerificator ConfigurationVerificator)
+        {
+            if (ConfigurationVerificator == null)
+            {
+                System.Environment.ExitCode = 2;
+                Console.Error.WriteLine("ERROR: The configuration verification is not properly implemented. " +
+                                        "To implement you need to override OnVerifyConfiguration base method and call to base.");
+            }
+            else
+            {
+                try
+                {
+                    var results = ConfigurationVerificator.Verify();
+                    System.Environment.ExitCode = results.All(r => r.Success) ? 0 : 1;
+
+                    if (Arguments.ConsoleOutputMode == ConsoleOutputMode.Color)
+                    {
+                        var (restoreFore, restoreBack) = (Console.ForegroundColor, Console.BackgroundColor);
+                        foreach (var result in results)
+                        {
+                            Console.BackgroundColor = result.Success ? ConsoleColor.Black : ConsoleColor.White;
+                            Console.ForegroundColor = result.Success ? ConsoleColor.White : ConsoleColor.Red;
+                            Console.WriteLine(result);
+                        }
+                        Console.BackgroundColor = restoreBack;
+                        Console.ForegroundColor = restoreFore;
+                    }
+                    else
+                    {
+                        foreach (var result in results)
+                            Console.WriteLine(result);
+                    }
+                    // Avoid extra messages in machine to machine mode or when disabled
+                    if (!(Console.IsOutputRedirected || Arguments.ConsoleOutputMode == ConsoleOutputMode.Disabled))
+                        Console.WriteLine("   ***   Shutting down [configuration verification mode].   ***   ");
+                }
+                catch (Exception ex)
+                {
+                    System.Environment.ExitCode = 3;
+                    Console.Error.WriteLine(ex.Message);
+                    Console.Error.WriteLine(ex.StackTrace);
+                }
+            }
+        }
+
+
+        protected void VerifyConfigurationsIfNeeded(
+            MicrodotHostingConfig hostingConfig, ConfigurationVerificator configurationVerificator)
+        {
+            if (FailServiceStartOnConfigError??hostingConfig.FailServiceStartOnConfigError)
+            {
+                var badConfigs = configurationVerificator.Verify().Where(c => !c.Success).ToList();
+                if (badConfigs.Any())
+                    throw new EnvironmentException("Bad configuration(s) detected. Stopping service startup. You can disable this behavior through the Microdot.Hosting.FailServiceStartOnConfigError configuration. Errors:\n"
+                        + badConfigs.Aggregate(new StringBuilder(), (sb, bc) => sb.Append(bc).Append("\n")));
+            }
+        }
+
+
         /// <summary>
         /// Waits for the service to finish starting. Mainly used from tests.
         /// </summary>
@@ -196,16 +307,27 @@ namespace Gigya.Microdot.Hosting.Service
             return ServiceStartedEvent.Task;
         }
 
+        public Task<StopResult> WaitForServiceGracefullyStoppedAsync()
+        {
+            return ServiceGracefullyStopped.Task;
+        }
+
 
         /// <summary>
         /// Signals the service to stop.
         /// </summary>
-        public void Stop()
+        public virtual void Stop()
         {
-            if (StopEvent.WaitOne(0))
-                throw new InvalidOperationException("Service is already stopped, or is running in an unsupported mode.");
-
             StopEvent.Set();
+        }
+
+        protected abstract void OnStart();
+
+        protected void OnCrash()
+        {
+            Stop();
+            WaitForServiceGracefullyStoppedAsync().Wait(5000);
+            Dispose();
         }
 
 
@@ -214,7 +336,6 @@ namespace Gigya.Microdot.Hosting.Service
             if (Arguments == null)
             {
                 Arguments = new ServiceArguments(args);
-                CurrentApplicationInfo.Init(ServiceName, Arguments.InstanceName, InfraVersion);
             }
 
             try
@@ -222,7 +343,7 @@ namespace Gigya.Microdot.Hosting.Service
                 if (Arguments.ServiceStartupMode != ServiceStartupMode.WindowsService)
                     throw new InvalidOperationException($"Cannot start in {Arguments.ServiceStartupMode} mode when starting as a Windows service.");
 
-                if (Environment.UserInteractive == false)
+                if (System.Environment.UserInteractive == false)
                 {
                     throw new InvalidOperationException(
                         "This Windows service requires to be run with 'user interactive' enabled to correctly read certificates. " +
@@ -249,7 +370,7 @@ namespace Gigya.Microdot.Hosting.Service
             WindowsService.RequestAdditionalTime(60000);
 
             try
-            {                
+            {
                 OnStop();
             }
             catch
@@ -259,29 +380,33 @@ namespace Gigya.Microdot.Hosting.Service
             }
 
         }
-        
-
-        protected abstract void OnStart();
-        protected abstract void OnStop();
 
 
         protected virtual void Dispose(bool disposing)
         {
-            if (disposed)
-                return;
-
             SafeDispose(StopEvent);
             SafeDispose(WindowsService);
             SafeDispose(MonitoredShutdownProcess);
-
-            disposed = true;
         }
 
 
         public void Dispose()
         {
-            Dispose(true);
-            GC.SuppressFinalize(this);
+            lock (this.syncRoot)
+            {
+                try
+                {
+                    if (this.disposed)
+                        return;
+
+                    Dispose(false);
+                }
+
+                finally
+                {
+                    this.disposed = true;
+                }
+            }
         }
 
         protected void SafeDispose(IDisposable disposable)
@@ -323,4 +448,7 @@ namespace Gigya.Microdot.Hosting.Service
             }
         }
     }
+
+    public enum StopResult { None, Graceful, Force}
+
 }

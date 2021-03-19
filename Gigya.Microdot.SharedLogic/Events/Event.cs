@@ -25,9 +25,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Gigya.Common.Contracts.Exceptions;
-using Gigya.Microdot.Interfaces.Configuration;
 using Gigya.Microdot.Interfaces.Events;
 using Gigya.Microdot.Interfaces.Logging;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.SharedLogic.Logging;
 using Gigya.Microdot.SharedLogic.Utils;
 
@@ -46,10 +46,10 @@ namespace Gigya.Microdot.SharedLogic.Events
     /// </remarks>
     public class Event : IEvent
     {
-        public IEnvironmentVariableProvider EnvironmentVariableProvider { get; set; }
+        public IEnvironment Environment { get; set; }
         public IStackTraceEnhancer StackTraceEnhancer { get; set; }
 
-        public IEventConfiguration Configuration { get; set; }
+        public EventConfiguration Configuration { get; set; }
 
         /// <summary>The type of the event, for publishing. Overridden by derived classes.</summary>
         [EventField(EventConsts.type)]
@@ -66,39 +66,53 @@ namespace Gigya.Microdot.SharedLogic.Events
 
         /// <summary>A unique, random ID coming from Gator</summary>    
         [EventField(EventConsts.spanID)]
-        public string SpanId { get; set; } = TracingContext.TryGetSpanID();
+        public string SpanId { get; set; }
 
         /// <summary>A unique, random ID coming from Gator</summary>    
         [EventField(EventConsts.parentSpanID)]
         public string ParentSpanId { get; set; } = TracingContext.TryGetParentSpanID();
 
+        [EventField(EventConsts.unknownTracingData, Encrypt = true)]
+        public Dictionary<string, object> UnknownTracingData { get; set; } = TracingContext.AdditionalProperties;
+
+
         //============ PUBLISHER INFO ===============
 
         /// <summary>The name of the reporting system (comments/socialize/hades/mongo etc)</summary>
         [EventField(EventConsts.srvSystem, OmitFromAudit = true)]
-        public string ServiceName { get; } = CurrentApplicationInfo.Name;
+        public string ServiceName { get; set;} // Publisher populated from CurrentApplicationInfo;
 
         /// <summary>The name of the instance of the reporting system</summary>
         [EventField(EventConsts.srvSystemInstance, OmitFromAudit = true)]
-        public string ServiceInstanceName { get; } = CurrentApplicationInfo.InstanceName == CurrentApplicationInfo.DEFAULT_INSTANCE_NAME ? null : CurrentApplicationInfo.InstanceName;
+        public string ServiceInstanceName { get; set;} // Publisher populated from CurrentApplicationInfo;
 
         [EventField(EventConsts.srvVersion, OmitFromAudit = true)]
-        public string ServiceVersion => CurrentApplicationInfo.Version.ToString(4);
+        public string ServiceVersion  { get; set;} // Publisher populated from CurrentApplicationInfo;
 
         [EventField(EventConsts.infrVersion, OmitFromAudit = true)]
-        public string InfraVersion => CurrentApplicationInfo.InfraVersion.ToString(4);
-
-        /// <summary>The value of the %ENV% environment variable. </summary>
-        [EventField(EventConsts.runtimeENV, OmitFromAudit = true)]
-        public string RuntimeENV => EnvironmentVariableProvider.DeploymentEnvironment;
-
-        /// <summary>The value of the %DC% environment variable. .</summary>
-        [EventField(EventConsts.runtimeDC, OmitFromAudit = true)]
-        public string RuntimeDC => EnvironmentVariableProvider.DataCenter;
+        public string InfraVersion  { get; set;} // Publisher populated from CurrentApplicationInfo;
 
         ///// <summary>The hostname of the server making the report</summary>    
         [EventField(EventConsts.runtimeHost)]
-        public string HostName => CurrentApplicationInfo.HostName;
+        public string HostName  { get; set; } = CurrentApplicationInfo.HostName;
+
+        /// <summary>The value of the %REGION% environment variable. .</summary>
+        [EventField(EventConsts.runtimeREGION, OmitFromAudit = true)]
+        public string RuntimeRegion => Environment.Region;
+
+        /// <summary>The value of the %REGION% environment variable. .</summary>
+        [EventField(EventConsts.runtimeZONE, OmitFromAudit = true)]
+        public string RuntimeZone => Environment.Zone;
+
+        /// <summary>The value of the %DC% environment variable. .</summary>
+        [EventField(EventConsts.runtimeDC, OmitFromAudit = true)]
+        [Obsolete("Deprecate after 2018; use region instead")]
+        public string RuntimeDC => Environment.Zone;
+
+        /// <summary>The value of the %ENV% environment variable. </summary>
+        [EventField(EventConsts.runtimeENV, OmitFromAudit = true)]
+        public string RuntimeENV => Environment.DeploymentEnvironment;
+
 
         //============ MESSAGE ===============
         public int? ErrCode { get; set; }
@@ -106,8 +120,9 @@ namespace Gigya.Microdot.SharedLogic.Events
         /// <summary>Returns the explicitly-set <see cref="ErrCode"/>, or an error code deduced from the
         /// <see cref="Exception"/>, or null if neither was set.</summary>
         [EventField(EventConsts.errCode)]
-        public int? ErrCode_ => ErrCode
-                                ?? ((Exception as RequestException)?.ErrorCode ?? (Exception != null ? 500001 //General Server Error
+        public int? ErrCode_ =>    ErrCode
+                                ?? ((Exception as RequestException)?.ErrorCode
+                                ?? (Exception != null ? 500001 //General Server Error
                                         : (int?)null));
 
         /// <summary>A short summary of the log event</summary>
@@ -223,6 +238,10 @@ namespace Gigya.Microdot.SharedLogic.Events
         /// <summary>Whether exception stack traces should be excluded. Note: can be overridden by derived classes.</summary>                
         public virtual bool ShouldExcludeStackTrace => Configuration.ExcludeStackTraceRule?.IsMatch(ErrCode_.ToString()) == true;
 
+        [EventField(EventConsts.context, AppendTypeSuffix = true)]
+        public IEnumerable<KeyValuePair<string, object>> ContextUnencryptedTags { get; set; } = TracingContext.TagsOrNull?.GetUnencryptedTags();
 
+        [EventField(EventConsts.context, Encrypt = true)]
+        public IEnumerable<KeyValuePair<string, object>> ContextTagsEncrypted { get; set; } = TracingContext.TagsOrNull?.GetEncryptedTags();
     }
 }

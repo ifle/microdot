@@ -21,6 +21,7 @@
 #endregion
 
 using System;
+using System.Net;
 using Gigya.Common.Contracts.Exceptions;
 using Gigya.Microdot.ServiceDiscovery.HostManagement;
 using Gigya.Microdot.SharedLogic;
@@ -34,7 +35,7 @@ namespace Gigya.Microdot.ServiceDiscovery
     {
         public override string SourceName => "Local";
 
-        public LocalDiscoverySource(ServiceDeployment serviceDeployment) : base($"{CurrentApplicationInfo.HostName}-{serviceDeployment.ServiceName}")
+        public LocalDiscoverySource(DeploymentIdentifier deploymentIdentifier) : base($"{CurrentApplicationInfo.HostName}-{deploymentIdentifier.ServiceName}")
         {
             Result = new EndPointsResult{EndPoints  = new[] { new EndPoint { HostName = CurrentApplicationInfo.HostName }}} ;
         }

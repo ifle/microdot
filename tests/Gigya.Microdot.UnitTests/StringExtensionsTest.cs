@@ -3,10 +3,11 @@ using Gigya.Microdot.SharedLogic.Utils;
 using NUnit.Framework;
 
 using Shouldly;
+using Gigya.Microdot.LanguageExtensions;
 
 namespace Gigya.Microdot.UnitTests
 {
-    [TestFixture]
+    [TestFixture,Parallelizable(ParallelScope.Fixtures)]
     public class StringExtensionsTest
     {
         [TestCase(@"c:\foo", @"c:", true)]

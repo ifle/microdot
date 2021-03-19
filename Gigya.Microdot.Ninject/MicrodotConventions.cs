@@ -23,8 +23,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Gigya.Microdot.Hosting.HttpService;
 using Gigya.Microdot.Interfaces.Configuration;
 using Gigya.Microdot.Interfaces.Events;
+using Gigya.Microdot.Interfaces.SystemWrappers;
+using Gigya.Microdot.Orleans.Hosting;
 using Ninject.Extensions.Conventions;
 using Ninject.Syntax;
 
@@ -32,41 +35,57 @@ namespace Gigya.Microdot.Ninject
 {
     public static class MicrodotConventions
     {
-        public static void BindClassesAsSingleton(this IBindingRoot bindingRoot, IList<Type> nonSingletonBaseTypes = null, params Type[] assemblies)
+        public static void BindClassesAsSingleton(
+            this IBindingRoot bindingRoot,
+            IList<Type> conventionIgnore = null,
+            params Type[] assemblies)
         {
             var list = new List<Type>
             {
                 typeof(IConfigObject),
-                typeof(IEvent)
+                typeof(IEvent),
+                typeof(HttpServiceListener),
+                typeof(GigyaSiloHost)
             };
 
-            if (nonSingletonBaseTypes != null)
+            if (conventionIgnore != null)
             {
-                list.AddRange(nonSingletonBaseTypes);
+                list.AddRange(conventionIgnore);
             }
+
+            
 
             bindingRoot.Bind(x =>
                 {
-                    x.FromAssemblyContaining(assemblies)
-                    .SelectAllClasses()
-                    .Where(t => list.All(nonSingletonType => nonSingletonType.IsAssignableFrom(t) == false))
+                    var types = x.FromAssemblyContaining(assemblies)
+                        .SelectAllClasses()
+                        .Where(t => list.All(nonSingletonType => nonSingletonType.IsAssignableFrom(t) == false));
+
+                    types
                     .BindToSelf()
                     .Configure(c => c.InSingletonScope());
                 });
         }
 
-        
-        public static void BindInterfacesAsSingleton(this IBindingRoot bindingRoot, IList<Type> nonSingletonBaseTypes = null, params Type[] assemblies)
+
+        public static void BindInterfacesAsSingleton(
+            this IBindingRoot bindingRoot,
+            IList<Type> conventionIgnore,
+            IList<Type> bindInterfacesInAssemblies,
+            params Type[] assemblies)
         {
             var list = new List<Type>
             {
                 typeof(IConfigObject),
-                typeof(IEvent)
+                typeof(IEvent),
+                typeof(IEnvironment),
+                typeof(HttpServiceListener),
+                typeof(GigyaSiloHost)
             };
 
-            if (nonSingletonBaseTypes != null)
+            if (conventionIgnore != null)
             {
-                list.AddRange(nonSingletonBaseTypes);
+                list.AddRange(conventionIgnore);
             }
 
             bindingRoot.Bind(x =>
@@ -74,9 +93,16 @@ namespace Gigya.Microdot.Ninject
                     x.FromAssemblyContaining(assemblies)
                     .SelectAllClasses()
                     .Where(t => list.All(nonSingletonType => nonSingletonType.IsAssignableFrom(t) == false))
-                    .BindAllInterfaces()
+                    // Bind interfaces to the implementation from assemblies ( by types )
+                    // The interfaces are from the specific assemblies ( by types as well)
+                    // The last is to avoid bind types arbitrary and isolate it to same assembly or abstraction assembly.
+                    .BindSelection((type, types) => 
+                        types.Where(i => assemblies.Select(a => a.Assembly).Contains(i.Assembly) || 
+                                         bindInterfacesInAssemblies?.Select(a => a.Assembly).Contains(i.Assembly) == true))
                     .Configure(c => c.InSingletonScope());
                 });
         }
+
+
     }
 }

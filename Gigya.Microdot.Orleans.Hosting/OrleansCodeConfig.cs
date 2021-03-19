@@ -26,15 +26,16 @@ namespace Gigya.Microdot.Orleans.Hosting
 {
     public class OrleansCodeConfig : BaseCommonConfig
     {
-        public OrleansCodeConfig(ServiceArguments serviceArguments = null)
-            : base(serviceArguments)
-        { }
-
         /// <summary>
         /// Whether to initialize the persistent reminders backend. Setting this to false and trying to register a
         /// reminder throws an exception.
         /// </summary>
-        public bool UseReminders { get; set; }
+        public Reminders RemindersSource  { get; set; }
+
+        public enum Reminders
+        {
+            InMemory = 0, Sql = 1
+        }
 
         public string StorageProviderTypeFullName { get; set; }
 

@@ -22,17 +22,33 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.Http;
+using Gigya.Common.Contracts.HttpService;
 using Gigya.Microdot.Configuration;
+using Gigya.Microdot.Configuration.Objects;
+using Gigya.Microdot.Hosting.HttpService;
+using Gigya.Microdot.Interfaces;
+using Gigya.Microdot.Interfaces.Configuration;
+using Gigya.Microdot.Interfaces.Logging;
+using Gigya.Microdot.Orleans.Hosting;
 using Gigya.Microdot.ServiceDiscovery;
+using Gigya.Microdot.ServiceDiscovery.AvailabilityZoneServiceDiscovery;
 using Gigya.Microdot.ServiceDiscovery.HostManagement;
+using Gigya.Microdot.ServiceDiscovery.Rewrite;
 using Gigya.Microdot.ServiceProxy;
 using Gigya.Microdot.SharedLogic;
+using Gigya.Microdot.SharedLogic.Events;
+using Gigya.Microdot.SharedLogic.HttpService;
 using Gigya.Microdot.SharedLogic.Monitor;
 using Metrics;
 using Ninject;
 using Ninject.Activation;
 using Ninject.Extensions.Factory;
 using Ninject.Modules;
+using ConsulClient = Gigya.Microdot.ServiceDiscovery.ConsulClient;
+using IConsulClient = Gigya.Microdot.ServiceDiscovery.IConsulClient;
 
 namespace Gigya.Microdot.Ninject
 {
@@ -42,29 +58,55 @@ namespace Gigya.Microdot.Ninject
     /// </summary>
     public class MicrodotModule : NinjectModule
     {
+    
         private readonly Type[] NonSingletonBaseTypes =
         {
             typeof(ConsulDiscoverySource),
             typeof(RemoteHostPool),
-            typeof(ConfigDiscoverySource)
+            typeof(LoadBalancer),
+            typeof(ConfigDiscoverySource),
+            typeof(HttpServiceListener),
+            typeof(GigyaSiloHost)
         };
 
         public override void Load()
         {
-            Kernel
-                .Bind(typeof(ConcurrentDictionary<,>))
-                .To(typeof(DisposableConcurrentDictionary<,>))
-                .InSingletonScope();
-
+            //Need to be initialized before using any regex!
+            new RegexTimeoutInitializer().Init();
+            Kernel.Bind(typeof(DisposableCollection<,>)).ToSelf().InSingletonScope();
             if (Kernel.CanResolve<Func<long, DateTime>>() == false)
                 Kernel.Load<FuncModule>();
 
-            this.BindClassesAsSingleton(NonSingletonBaseTypes, typeof(ConfigurationAssembly), typeof(ServiceProxyAssembly));
-            this.BindInterfacesAsSingleton(NonSingletonBaseTypes, typeof(ConfigurationAssembly), typeof(ServiceProxyAssembly), typeof(SharedLogicAssembly),typeof(ServiceDiscoveryAssembly));
+            this.BindClassesAsSingleton(
+                NonSingletonBaseTypes,
+                typeof(ConfigurationAssembly),
+                typeof(ServiceProxyAssembly));
+            
+            this.BindInterfacesAsSingleton(
+                NonSingletonBaseTypes,
+                new List<Type>{typeof(ILog)}, 
+                typeof(ConfigurationAssembly), 
+                typeof(ServiceProxyAssembly), 
+                typeof(SharedLogicAssembly), 
+                typeof(ServiceDiscoveryAssembly));
+
 
             Bind<IRemoteHostPoolFactory>().ToFactory();
 
+            Kernel.BindPerKey<string, ReportingStrategy, IPassiveAggregatingHealthCheck, PassiveAggregatingHealthCheck>();
+
+            Kernel.BindPerKey<string, ReachabilityCheck, IMultiEnvironmentServiceDiscovery, MultiEnvironmentServiceDiscovery>();
             Kernel.BindPerKey<string, ReachabilityChecker, IServiceDiscovery, ServiceDiscovery.ServiceDiscovery>();
+            Kernel.Bind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => HttpClientConfiguration =>
+            {
+                var clientHandler = new HttpClientHandler();
+                if (HttpClientConfiguration.UseHttps)
+                {
+                    var httpAuthenticator = c.Kernel.Get<IHttpsAuthenticator>();
+                    httpAuthenticator.AddHttpMessageHandlerAuthentication(clientHandler, HttpClientConfiguration);
+                }
+                return clientHandler;
+            });
             Kernel.BindPerString<IServiceProxyProvider, ServiceProxyProvider>();
             Kernel.BindPerString<AggregatingHealthStatus>();
 
@@ -76,10 +118,29 @@ namespace Gigya.Microdot.Ninject
             Bind<IServiceDiscoverySource>().To<LocalDiscoverySource>().InTransientScope();
             Bind<IServiceDiscoverySource>().To<ConfigDiscoverySource>().InTransientScope();
 
-            Kernel.BindPerString<IConsulClient, ConsulClient>();
+            Bind<INodeSourceFactory>().To<ConsulNodeSourceFactory>().InTransientScope();
+            Rebind<ILoadBalancer>().To<LoadBalancer>().InTransientScope();
+            Rebind<NodeMonitoringState>().ToSelf().InTransientScope();
+            Bind<IDiscovery>().To<Discovery>().InSingletonScope();
 
+            Rebind<ServiceDiscovery.Rewrite.ConsulClient, ServiceDiscovery.Rewrite.IConsulClient>()
+                .To<ServiceDiscovery.Rewrite.ConsulClient>().InSingletonScope();            
+            
+
+            Kernel.Rebind<IConsulClient>().To<ConsulClient>().InTransientScope();
             Kernel.Load<ServiceProxyModule>();
-            Kernel.Load<ConfigObjectsModule>();
+
+            Kernel.Rebind<IConfigObjectsCache>().To<ConfigObjectsCache>().InSingletonScope();
+            Kernel.Rebind<IConfigObjectCreator>().To<ConfigObjectCreator>().InTransientScope();
+            Kernel.Bind<IConfigEventFactory>().To<ConfigEventFactory>();
+            Kernel.Bind<IConfigFuncFactory>().ToFactory();
+
+            // ServiceSchema is at ServiceContracts, and cannot be depended on IServiceInterfaceMapper, which belongs to Microdot
+            Kernel.Rebind<ServiceSchema>()
+                .ToMethod(c =>new ServiceSchema(c.Kernel.Get<IServiceInterfaceMapper>().ServiceInterfaceTypes.ToArray())).InSingletonScope();
+
+            Kernel.Rebind<SystemInitializer.SystemInitializer>().ToSelf().InSingletonScope();
+            Kernel.Rebind<IAvailabilityZoneServiceDiscovery>().To<AvailabilityZoneServiceDiscovery>().InTransientScope();
         }
 
 

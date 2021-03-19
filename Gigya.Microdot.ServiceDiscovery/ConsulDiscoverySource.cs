@@ -27,8 +27,10 @@ using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
 using Gigya.Common.Contracts.Exceptions;
 using Gigya.Microdot.Interfaces.Logging;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.ServiceDiscovery.Config;
 using Gigya.Microdot.ServiceDiscovery.HostManagement;
+using Gigya.Microdot.ServiceDiscovery.Rewrite;
 
 namespace Gigya.Microdot.ServiceDiscovery
 {
@@ -38,16 +40,18 @@ namespace Gigya.Microdot.ServiceDiscovery
 
         public override string SourceName => Name;
         public override bool SupportsFallback => true;
-        public override bool IsServiceDeploymentDefined => ConsulClient.Result.IsQueryDefined;
+        public override bool IsServiceDeploymentDefined => Result.IsQueryDefined;
 
         private IConsulClient ConsulClient { get; set; }
+        public IDateTime DateTime { get; }
 
         private readonly Func<string, IConsulClient> _getConsulClient;
         private readonly ILog _log;
 
         private readonly object _resultLocker = new object();
 
-        private readonly TaskCompletionSource<bool> _initialized;
+        private readonly TaskCompletionSource<bool> _firstResultInitialized;
+        private Task _initializationTimeout;
 
         private bool _firstTime = true;
 
@@ -55,18 +59,21 @@ namespace Gigya.Microdot.ServiceDiscovery
         private IDisposable _resultChangedLink;
         private readonly object _initLock = new object();
 
-        private bool _disposed; 
+        private bool _disposed;
+        
 
-        public ConsulDiscoverySource(ServiceDeployment serviceDeployment,
+        public ConsulDiscoverySource(DeploymentIdentifier deploymentIdentifier,
+            IDateTime dateTime,
             Func<DiscoveryConfig> getConfig,
             Func<string, IConsulClient> getConsulClient, ILog log)
-            : base(GetDeploymentName(serviceDeployment, getConfig().Services[serviceDeployment.ServiceName]))
+            : base(GetDeploymentName(deploymentIdentifier, getConfig().Services[deploymentIdentifier.ServiceName]))
 
-        {            
+        {
+            DateTime = dateTime;
             _getConsulClient = getConsulClient;            
             _log = log;
 
-            _initialized = new TaskCompletionSource<bool>();            
+            _firstResultInitialized = new TaskCompletionSource<bool>();            
         }
 
         public override Task Init()
@@ -77,7 +84,20 @@ namespace Gigya.Microdot.ServiceDiscovery
                     _resultChangedLink = ConsulClient.ResultChanged.LinkTo(new ActionBlock<EndPointsResult>(r => ConsulResultChanged(r)));
 
             ConsulClient.Init();
-            return _initialized.Task;
+
+            _initializationTimeout = TimeoutIfNotReceivedFirstResult();
+            return Task.WhenAny(_firstResultInitialized.Task, _initializationTimeout);            
+        }
+
+        private async Task TimeoutIfNotReceivedFirstResult()
+        {
+            await DateTime.Delay(TimeSpan.FromSeconds(10));
+            if (_firstResultInitialized.Task.GetAwaiter().IsCompleted)
+                return;
+            ConsulResultChanged(new EndPointsResult
+            {
+                Error = new Exception("ConsulClient did not respond. Cannot obtain list of available nodes.")
+            });
         }
 
         private void ConsulResultChanged(EndPointsResult newResult)
@@ -111,8 +131,8 @@ namespace Gigya.Microdot.ServiceDiscovery
 
                 _lastResult = newResult;
                 _firstTime = false;
-                _initialized.TrySetResult(true);
             }
+            _firstResultInitialized.TrySetResult(true);
         }
 
         private IEnumerable<EndPoint> OrderedEndpoints(IEnumerable<EndPoint> endpoints)
@@ -175,13 +195,14 @@ namespace Gigya.Microdot.ServiceDiscovery
             _disposed = true;
         }
 
-        public static string GetDeploymentName(ServiceDeployment serviceDeployment, ServiceDiscoveryConfig serviceDiscoverySettings)
+        public static string GetDeploymentName(DeploymentIdentifier deploymentIdentifier, ServiceDiscoveryConfig serviceDiscoverySettings)
         {
-            if (serviceDiscoverySettings.Scope == ServiceScope.DataCenter)
+            if (serviceDiscoverySettings.Scope == ServiceScope.Zone)
             {
-                return serviceDeployment.ServiceName;
+                return deploymentIdentifier.ServiceName;
             }
-            return $"{serviceDeployment.ServiceName}-{serviceDeployment.DeploymentEnvironment}";
+
+            return deploymentIdentifier.GetConsulServiceName();
         }
 
     }

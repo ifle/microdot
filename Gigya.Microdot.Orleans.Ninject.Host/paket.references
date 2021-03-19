@@ -1,3 +1,4 @@
+Gigya.ServiceContract
 Microsoft.Extensions.DependencyInjection
 Microsoft.Extensions.DependencyInjection.Abstractions
 Microsoft.Orleans.Core
@@ -6,3 +7,7 @@ Microsoft.Orleans.OrleansProviders
 Ninject
 Ninject.Extensions.Conventions
 Ninject.Extensions.Factory
+Microsoft.Orleans.Server
+
+Microsoft.CSharp
+System.Net.Http

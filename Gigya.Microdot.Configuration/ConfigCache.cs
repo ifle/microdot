@@ -21,42 +21,56 @@
 #endregion
 
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
 using Gigya.Microdot.Interfaces.Logging;
+using Gigya.Microdot.SharedLogic.Monitor;
+using Metrics;
 using Newtonsoft.Json.Linq;
 
 namespace Gigya.Microdot.Configuration
 {
     public class ConfigCache
     {
+        private readonly IHealthMonitor _healthMonitor;
+        private readonly ConcurrentDictionary<string,string> _deprecatedArrayEntries = new ConcurrentDictionary<string, string>();
         public ISourceBlock<ConfigItemsCollection> ConfigChanged => ConfigChangedBroadcastBlock;
         public ConfigItemsCollection LatestConfig { get; private set; }
+        public DateTime? LatestConfigFileModifyTime { get; private set; }
 
         private ILog Log { get; }
 
         private IConfigItemsSource Source { get; }
         private BroadcastBlock<ConfigItemsCollection> ConfigChangedBroadcastBlock { get; }
 
-        public ConfigCache(IConfigItemsSource source, IConfigurationDataWatcher watcher,ILog log)
+        public ConfigCache(IConfigItemsSource source, IConfigurationDataWatcher watcher,ILog log, IHealthMonitor healthMonitor)
         {
             Source = source;
             Log = log;
             ConfigChangedBroadcastBlock = new BroadcastBlock<ConfigItemsCollection>(null);
-
+            
             watcher.DataChanges.LinkTo(new ActionBlock<bool>(nothing => Refresh()));
 
+            _healthMonitor = healthMonitor;
+            _healthMonitor.SetHealthFunction(nameof(ConfigCache),HealthCheck);
             Refresh(false).GetAwaiter().GetResult();
         }
 
+        private HealthCheckResult HealthCheck()
+        {
+            if (_deprecatedArrayEntries.IsEmpty)
+                return HealthCheckResult.Healthy();
+            return HealthCheckResult.Unhealthy(string.Join(Environment.NewLine,_deprecatedArrayEntries.Values));
+        }
 
         private async Task Refresh(bool catchExceptions=true)
         {
             //Prevents faulting of action block
             try
             {
-                LatestConfig = await Source.GetConfiguration().ConfigureAwait(false);
+                (LatestConfig, LatestConfigFileModifyTime) = await Source.GetConfiguration().ConfigureAwait(false);
                 ConfigChangedBroadcastBlock.Post(LatestConfig);
             }
             catch(Exception ex) when(catchExceptions)
@@ -73,6 +87,11 @@ namespace Gigya.Microdot.Configuration
 
             foreach (var configItem in LatestConfig.Items.Where(kvp => kvp.Key.StartsWith(path,StringComparison.OrdinalIgnoreCase)))
             {
+                //Since we can't throw exceptions during the parsing of the config (as a bad config could cause all services to fail to load)
+                //we postpone the throwing to when the config is required, this way only the service with the bad config will fail the health check
+                if (configItem.ParsingException != null)
+                    throw configItem.ParsingException;
+
                 var pathParts = configItem.Key.Substring(path.Length).Split('.');
                 var currentObj = root;
 
@@ -89,7 +108,22 @@ namespace Gigya.Microdot.Configuration
                     currentObj = (JObject)existing;
                 }
 
-                currentObj[pathParts.Last()] = configItem.Value;
+                JToken value = configItem.isArray != ArrayType.None ? (JToken)JArray.Parse(configItem.Value) : configItem.Value;
+
+                if (configItem.isArray == ArrayType.List)
+                {
+                    _deprecatedArrayEntries.TryAdd(configItem.Key, $"Usage of deprecated -list syntax found for key:{configItem.Key}");
+                }
+                else
+                {
+                    //Clean up old warnings but only if there were any 
+                    if (_deprecatedArrayEntries.IsEmpty == false)
+                    {
+                        _deprecatedArrayEntries.TryRemove(configItem.Key, out _);
+                    }
+                }
+
+                currentObj[pathParts.Last()] = value;
             }
 
             return root;

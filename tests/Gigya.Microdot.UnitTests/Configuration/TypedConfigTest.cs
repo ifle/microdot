@@ -3,11 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
+using Gigya.Microdot.Configuration;
 using Gigya.Microdot.Fakes;
 using Gigya.Microdot.Interfaces.Configuration;
 using Gigya.Microdot.SharedLogic.Exceptions;
 using Gigya.Microdot.SharedLogic.Monitor;
-using Gigya.Microdot.Testing;
 using Gigya.Microdot.Testing.Shared;
 using Ninject;
 using NUnit.Framework;
@@ -41,7 +41,7 @@ namespace Gigya.Microdot.UnitTests.Configuration
             var elapsed = sw.Elapsed;
         }
     }
-
+    [TestFixture,Parallelizable(ParallelScope.Fixtures)]
     public class TypedConfigTest
     {
         private DateTime dateTime = new DateTime(2016, 11, 8, 15, 57, 20);
@@ -74,7 +74,7 @@ namespace Gigya.Microdot.UnitTests.Configuration
             var infraKernel = new TestingKernel<ConsoleLog>(mockConfig: new Dictionary<string, string>
             {
                 {"BusSettings.TopicName", "il3-_env_func-infraTest"},
-                {"BusSettings.MessageFormatNullable", "Json"},
+                {"BusSettings.MessageFormatNullable", "Avro"},
             });
 
             var notifications = infraKernel.Get<ISourceBlock<BusSettings>>();
@@ -95,12 +95,14 @@ namespace Gigya.Microdot.UnitTests.Configuration
             configItems.SetValue("BusSettings.MessageFormatNullable", "Invalid");
             eventSource.RaiseChangeEvent();
             await Task.Delay(100);
+            // Since the config is invalid, the config object isn't updated and the event wasn't triggered
             configFromNotification.ShouldBeNull();
 
             configFromNotification = null;
             configItems.SetValue("BusSettings.MessageFormatNullable", "Json");
             eventSource.RaiseChangeEvent();
             await Task.Delay(100);
+            // Since the config is valid AND a property changed (Avro --> Json), the config object was updated and an event was triggered
             configFromNotification.ShouldNotBeNull();
         }
 
@@ -249,8 +251,8 @@ namespace Gigya.Microdot.UnitTests.Configuration
             });
 
             var extractor = infraKernel.Get<Func<BusSettings>>();
-            var configItems = infraKernel.Get<OverridableConfigItems>();
-            var eventSource = infraKernel.Get<ManualConfigurationEvents>();
+            var configItems = infraKernel.Get<IConfigItemsSource>() as OverridableConfigItems;
+            var eventSource = infraKernel.Get<IConfigurationDataWatcher>() as ManualConfigurationEvents;
 
             //Make sure a good configuration have been parsed.
             var busSettings = extractor();

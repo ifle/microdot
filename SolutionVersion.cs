@@ -1,4 +1,4 @@
-﻿#region Copyright 
+#region Copyright 
 // Copyright 2017 Gigya Inc.  All rights reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License"); 
@@ -25,13 +25,12 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 
 [assembly: AssemblyCompany("Gigya Inc.")]
-[assembly: AssemblyCopyright("© 2017 Gigya Inc.")]
+[assembly: AssemblyCopyright("© 2018 Gigya Inc.")]
 [assembly: AssemblyDescription("Microdot Framework")]
 
-[assembly: AssemblyVersion("1.7.6.0")]
-[assembly: AssemblyFileVersion("1.7.6.0")] 
-[assembly: AssemblyInformationalVersion("1.7.6.0")]
-
+[assembly: AssemblyVersion("2.3.0.0")]
+[assembly: AssemblyFileVersion("2.3.0.0")] 
+[assembly: AssemblyInformationalVersion("2.3.0.0")]
 
 // Setting ComVisible to false makes the types in this assembly not visible 
 // to COM components.  If you need to access a type in this assembly from 

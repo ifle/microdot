@@ -28,45 +28,41 @@ using Gigya.Microdot.Interfaces.Configuration;
 
 namespace Gigya.Microdot.Fakes
 {
-    public class OverridableConfigItems :IConfigItemsSource
+    public class OverridableConfigItems : IConfigItemsSource
     {
+        private readonly ConfigDecryptor _configDecryptor;
         private Dictionary<string, string> Data { get; }
 
         private FileBasedConfigItemsSource FileBasedConfigItemsSource { get; }
 
-
         public OverridableConfigItems(FileBasedConfigItemsSource fileBasedConfigItemsSource,
-                                        Dictionary<string, string> data)
+                                        Dictionary<string, string> data, ConfigDecryptor configDecryptor)
         {
+            _configDecryptor = configDecryptor;
             FileBasedConfigItemsSource = fileBasedConfigItemsSource;
-            Data = data;           
+            Data = data;
         }
 
 
-        public OverridableConfigItems(FileBasedConfigItemsSource fileBasedConfigItemsSource)
-        {
-            FileBasedConfigItemsSource = fileBasedConfigItemsSource;
-            Data = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        }
-
-        public async Task<ConfigItemsCollection> GetConfiguration()
+        public async Task<(ConfigItemsCollection Configs, DateTime? LastModified)> GetConfiguration()
         {
             ConfigItemsCollection configItemCollection = null;
 
             if (FileBasedConfigItemsSource != null)
-            configItemCollection = await FileBasedConfigItemsSource.GetConfiguration().ConfigureAwait(false);
-            return new MockConfigItemsCollection(GetConfigItemsOverrides, configItemCollection);
+                configItemCollection = (await FileBasedConfigItemsSource.GetConfiguration().ConfigureAwait(false)).Configs;
+            return (new MockConfigItemsCollection(GetConfigItemsOverrides, configItemCollection), null);
         }
 
 
         private Dictionary<string, ConfigItem> GetConfigItemsOverrides()
         {
             var items = new Dictionary<string, ConfigItem>(StringComparer.OrdinalIgnoreCase);
-            foreach(var item in Data)
+            foreach (var item in Data)
             {
-                items.Add(item.Key, new ConfigItem
+                items.Add(item.Key, new ConfigItem(_configDecryptor)
                 {
-                    Key = item.Key, Value = item.Value,
+                    Key = item.Key,
+                    Value = item.Value,
                     Overrides = new List<ConfigItemInfo>
                     {
                         new ConfigItemInfo {

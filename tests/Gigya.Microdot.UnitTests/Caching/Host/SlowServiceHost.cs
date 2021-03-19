@@ -1,54 +1,34 @@
-﻿using System;
-using Gigya.Microdot.Fakes;
-using Gigya.Microdot.Fakes.Discovery;
-using Gigya.Microdot.Interfaces;
-using Gigya.Microdot.Interfaces.Events;
-using Gigya.Microdot.Interfaces.Logging;
+﻿using Gigya.Microdot.Common.Tests;
+using Gigya.Microdot.Fakes.KernelUtils;
+using Gigya.Microdot.Hosting.Environment;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.Ninject;
 using Gigya.Microdot.Ninject.Host;
-using Gigya.Microdot.ServiceDiscovery;
 using Gigya.Microdot.SharedLogic;
+using Gigya.Microdot.SharedLogic.HttpService;
 using Ninject;
-using Ninject.Syntax;
 
 namespace Gigya.Microdot.UnitTests.Caching.Host
 {
-    public class FakesLoggersModules : ILoggingModule
-    {
-        private readonly bool _useHttpLog;
-
-        public FakesLoggersModules(bool useHttpLog)
-        {
-            _useHttpLog = useHttpLog;
-        }
-
-        public void Bind(IBindingToSyntax<ILog> logBinding, IBindingToSyntax<IEventPublisher> eventPublisherBinding)
-        {
-            if (_useHttpLog)
-                logBinding.To<HttpLog>();
-            else
-                logBinding.To<ConsoleLog>();
-
-            eventPublisherBinding.To<NullEventPublisher>();
-        }
-    }
-
     public class SlowServiceHost : MicrodotServiceHost<ISlowService>
     {
-        private readonly Action<IKernel> action;
+        public override string ServiceName => nameof(ISlowService).Substring(1);
+        protected override ILoggingModule GetLoggingModule() { return new ConsoleLogLoggersModules(); }
 
-        public SlowServiceHost(Action<IKernel> action = null)
+
+        protected override void PreConfigure(IKernel kernel, ServiceArguments Arguments)
         {
-            this.action = action;
+            var env = new HostEnvironment(new TestHostEnvironmentSource(appName: ServiceName));
+            kernel.Rebind<IEnvironment>().ToConstant(env).InSingletonScope();
+            kernel.Rebind<CurrentApplicationInfo>().ToConstant(env.ApplicationInfo).InSingletonScope();
+            base.PreConfigure(kernel, Arguments);
         }
 
-        protected override ILoggingModule GetLoggingModule() { return new FakesLoggersModules(false); }
         protected override void Configure(IKernel kernel, BaseCommonConfig commonConfig)
         {
-            kernel.Rebind<IMetricsInitializer>().To<MetricsInitializerFake>().InSingletonScope();
-            kernel.Rebind<IDiscoverySourceLoader>().To<AlwaysLocalHost>().InSingletonScope();
-            action?.Invoke(kernel);
             kernel.Bind<ISlowService>().To<SlowService>().InSingletonScope();
+            kernel.Rebind<ICertificateLocator>().To<DummyCertificateLocator>().InSingletonScope();
+            kernel.RebindForTests();
         }
     }
 }

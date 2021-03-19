@@ -20,10 +20,13 @@
 // POSSIBILITY OF SUCH DAMAGE.
 #endregion
 
+using System;
 using System.Text.RegularExpressions;
 
 namespace Gigya.Microdot.Interfaces.Events
 {
+    // TODO: Remove
+    [Obsolete]
 	public interface IEventConfiguration
 	{		
 		Regex ExcludeStackTraceRule { get; set; }

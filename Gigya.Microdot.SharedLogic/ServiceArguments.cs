@@ -71,16 +71,26 @@ namespace Gigya.Microdot.SharedLogic
         public int? ShutdownWhenPidExits { get; }
 
         /// <summary>
-        /// Defines wait time before service is stoping, default is 10 seconds.
+        /// Specifies drain time in this time the service status will be 521.
         /// </summary>
-        public TimeSpan? OnStopWaitTime { get;  }
+        public int? ServiceDrainTimeSec { get;  }
 
         /// <summary>
-        /// An array of processor IDs the service should run on, otherwise null if none are is specified. This also affects the degree
-        /// or parallism of the underlying runtime (e.g. the number of threads Orleans will be configured with). Mainly used for 
-        /// multi-tenant servers where multiple services run, each with dedicated CPU cores.
+        /// Defines the time to wait for the service to stop, default is 10 seconds. Only after OnStopWaitTimeSec+ServiceDrainTimeSec the service will be forcibly closed.
         /// </summary>
-        public int[] ProcessorAffinity { get; }
+        public int? OnStopWaitTimeSec { get; private set; }
+
+        /// <summary>
+        /// Defines the time to wait for the service to start, if elapsed, the service start aborted. Default is 180 seconds.
+        /// </summary>
+        public int? InitTimeOutSec { get; private set; }
+
+        /// <summary>
+        /// Secondary nodes without ZooKeeper are only supported on a developer's machine (or unit tests).
+        /// In case the primary node runs on a custom port (i.e. uses BasePortOverride), secondary nodes need to be able
+        /// to know what port it's running at. Use this property.
+        ///</summary> 
+        public int? BasePortOfPrimarySilo { get ; set ; }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ServiceArguments"/> class, explicitly specifying the arguments.
@@ -94,7 +104,7 @@ namespace Gigya.Microdot.SharedLogic
                                 ConsoleOutputMode consoleOutputMode = ConsoleOutputMode.Unspecified,
                                 SiloClusterMode siloClusterMode = SiloClusterMode.Unspecified,
                                 int? basePortOverride = null, string instanceName = null,
-                                int? shutdownWhenPidExits = null, int? slotNumber = null, TimeSpan? onStopWaitTimeInMs=null)
+                                int? shutdownWhenPidExits = null, int? slotNumber = null, int? onStopWaitTimeSec=null,int? serviceDrainTimeSec=null, int?  initTimeOutSec=null)
         {
             ServiceStartupMode = serviceStartupMode;
             ConsoleOutputMode = consoleOutputMode;
@@ -103,7 +113,9 @@ namespace Gigya.Microdot.SharedLogic
             InstanceName = instanceName;
             ShutdownWhenPidExits = shutdownWhenPidExits;
             SlotNumber = slotNumber;
-            OnStopWaitTime = onStopWaitTimeInMs;
+            OnStopWaitTimeSec = onStopWaitTimeSec;
+            ServiceDrainTimeSec = serviceDrainTimeSec;
+            InitTimeOutSec = initTimeOutSec;
             ApplyDefaults();
         }
 
@@ -114,40 +126,19 @@ namespace Gigya.Microdot.SharedLogic
         /// <param name="args">An array of strings, each containing a single argument.</param>
         public ServiceArguments(string[] args)
         {
-            ServiceStartupMode = ParseEnumArg<ServiceStartupMode>(args);
-            ConsoleOutputMode = ParseEnumArg<ConsoleOutputMode>(args);
-            SiloClusterMode = ParseEnumArg<SiloClusterMode>(args);
-            BasePortOverride = TryParseInt(ParseStringArg(nameof(BasePortOverride), args));
-            InstanceName = ParseStringArg(nameof(InstanceName), args);
-            ShutdownWhenPidExits = TryParseInt(ParseStringArg(nameof(ShutdownWhenPidExits), args));
-            SlotNumber = TryParseInt(ParseStringArg(nameof(SlotNumber), args));
-            OnStopWaitTime = TryParseTimeSpan(ParseStringArg(nameof(OnStopWaitTime), args));
-            ProcessorAffinity = ParseProcessorIds(ParseStringArg(nameof(ProcessorAffinity), args));
+            ServiceStartupMode    = ParseEnumArg<ServiceStartupMode>(args);
+            ConsoleOutputMode     = ParseEnumArg<ConsoleOutputMode>(args);
+            SiloClusterMode       = ParseEnumArg<SiloClusterMode>(args);
+            BasePortOverride      = ParseIntArg(nameof(BasePortOverride), args);
+            InstanceName          = ParseStringArg(nameof(InstanceName), args);
+            ShutdownWhenPidExits  = ParseIntArg(nameof(ShutdownWhenPidExits), args);
+            SlotNumber            = ParseIntArg(nameof(SlotNumber), args);
+            OnStopWaitTimeSec     = ParseIntArg(nameof(OnStopWaitTimeSec), args);
+            ServiceDrainTimeSec   = ParseIntArg(nameof(ServiceDrainTimeSec), args);
+            InitTimeOutSec        = ParseIntArg(nameof(InitTimeOutSec), args);
+            BasePortOfPrimarySilo = ParseIntArg(nameof(BasePortOfPrimarySilo), args);
+
             ApplyDefaults();
-        }
-
-        private static TimeSpan? TryParseTimeSpan(string str) { return TimeSpan.TryParse(str, out TimeSpan val) ? (TimeSpan?)val : null; }
-
-        private static int? TryParseInt(string str) { return int.TryParse(str, out int val) ? (int?)val : null; }
-
-        private static int[] ParseProcessorIds(string processorIdList)
-        {
-            var processorAffinity = processorIdList?
-                .Split(',')
-                .Select(TryParseInt)
-                .Where(i => i != null)
-                .Select(i => i.Value)
-                .Distinct()
-                .OrderBy(i => i)
-                .ToArray();
-
-            if (processorAffinity == null || processorAffinity.Length == 0)
-                return null;
-
-            if (processorAffinity.Any(id => id < 0 || id >= Environment.ProcessorCount))
-                throw new ArgumentOutOfRangeException(nameof(ProcessorAffinity), $"The specified processor affinity list contains an invalid processor ID. On this machine, processor IDs must be between 0 and {Environment.ProcessorCount - 1}, inclusive.");
-
-            return processorAffinity;
         }
 
 
@@ -169,6 +160,9 @@ namespace Gigya.Microdot.SharedLogic
                     case ServiceStartupMode.CommandLineInteractive:
                         ConsoleOutputMode = ConsoleOutputMode.Color;
                         break;
+                    case ServiceStartupMode.VerifyConfigurations:
+                        ConsoleOutputMode = Console.IsInputRedirected ? ConsoleOutputMode.Standard : ConsoleOutputMode.Color;
+                        break;
                     case ServiceStartupMode.CommandLineNonInteractive:
                         ConsoleOutputMode = ConsoleOutputMode.Standard;
                         break;
@@ -186,6 +180,7 @@ namespace Gigya.Microdot.SharedLogic
                 {
                     case ServiceStartupMode.CommandLineInteractive:
                     case ServiceStartupMode.CommandLineNonInteractive:
+                    case ServiceStartupMode.VerifyConfigurations:
                         SiloClusterMode = SiloClusterMode.PrimaryNode;
                         break;
                     case ServiceStartupMode.WindowsService:
@@ -195,18 +190,26 @@ namespace Gigya.Microdot.SharedLogic
                         throw new ArgumentOutOfRangeException();
                 }
             }
+
+            if (OnStopWaitTimeSec == null)
+                OnStopWaitTimeSec = 10;
+            if (InitTimeOutSec == null)
+                InitTimeOutSec = 60*3;
             // ReSharper restore SwitchStatementMissingSomeCases
         }
 
 
-        private static T ParseEnumArg<T>(string[] args)
+        private static T ParseEnumArg<T>(string[] args) where T : struct
         {
             var arg = args.FirstOrDefault(a => a.StartsWith($"--{typeof(T).Name}:", StringComparison.InvariantCultureIgnoreCase));
 
             if (arg == null)
                 return default(T);
 
-            return (T)Enum.Parse(typeof(T), arg.Split(':').Last(), true);
+            else if (!Enum.TryParse<T>(arg.Split(':').Last(), ignoreCase: true, out T value))
+                throw new ArgumentException($"Invalid value '{arg.Split(':').Last()}' for parameter '{typeof(T).Name}'. Must be either: {string.Join(", ", Enum.GetNames(typeof(T)))}");
+
+            else return value;
         }
 
 
@@ -215,6 +218,109 @@ namespace Gigya.Microdot.SharedLogic
             return args.FirstOrDefault(a => a.StartsWith($"--{name}:", StringComparison.InvariantCultureIgnoreCase))
                 ?.Split(':').Last();
         }
+
+
+        private static int? ParseIntArg(string name, string[] args)
+        {
+            string valueStr = ParseStringArg(name, args);
+            if (valueStr == null)
+                return null;
+            else if (!int.TryParse(valueStr, out int value))
+                throw new ArgumentException($"Invalid value '{valueStr}' for parameter '{name}'. Must be an integer.");
+            else return value;
+        }
+
+
+        public static bool IsHelpRequired(string[] args) => args.Any(arg => arg == "-h" || arg == "--help" || arg == "/?");
+
+
+        public static string GetHelpDocumentation() => @"
+All parameters must be passed as: --param:value
+Supported parameters:
+
+-h, --help or /?: This help screen
+        
+--ServiceStartupMode: Specifies under which mode to start the service (command
+    line, Windows service, etc). Possible values:
+
+    CommandLineInteractive: Specifies that the service will run in command-line
+        mode, expecting input from the user. This is the default value when
+        compiled with 'Debug' when Console.IsInputRedirected == false.
+
+    CommandLineNonInteractive: Specifies that the service will run in command-
+        line mode, not requiring any input from the user. This is the default
+        value when compiled with 'Debug' when Console.IsInputRedirected == true.
+
+    WindowsService: Specifies that the service will run as a Windows service.
+        This is the default value when compiled with 'Release'.
+
+	VerifyConfigurations: Specifies that the service will run to verify
+        configuration objects only (while performing only minimal required
+        initialization). Available IConfigObject implementations (config
+        objects) in service assemblies will be instantiated to pass validations.
+        The validation errors will be reported in console.
+
+--ConsoleOutputMode: Specifies how to output log messages to the console, if at
+    all. Possible values:
+
+    Color: Specifies that log messages should be written to the console with
+        coloring. This is the default when running as CommandLineInteractive.
+
+    Standard: Specifies that log messages should be written to the console
+        without coloring. This is the default when running as
+        CommandLineNonInteractive.
+
+    Disabled: Specifies that log messages should not be written to the console
+        at all. This is the default when running as WindowsService.
+
+--SiloClusterMode: Specifies how a silo started in this service should behave in
+    a cluster. Not relevant for non-Orleans services. Possible values:
+
+    PrimaryNode: Specifies that this node is the primary node in a local cluster
+        and should host its own in-memory membership and reminder tables. This
+        is the default when running as either CommandLineInteractive,
+        CommandLineNonInteractive or VerifyConfigurations.
+
+    SecondaryNode: Specifies that this node is a secondary node in a local
+        cluster, and should contact a primary node for membership and reminder
+        tables.
+
+    ZooKeeper: Specifies that this node belongs to a real cluster, which has its
+        membership table managed by ZooKeeper and the reminder table stored on
+        an external database. Default when running as WindowsService.
+
+--BasePortOverride: Specifies what base port should be used for the silo. Not
+    relevant for non-Orleans services. This value takes precedence over any base
+    port overrides in configuration.
+
+--SlotNumber: Slot Number value in the range (1..[Range Size - 1]). By default
+    the valid offsets slot numbers will be in the range 1-999. It used in
+    calculating service ports like this:
+        [BasePort]+[RangeSize]*[Protocol]+[SlotNumber].
+
+--InstanceName: Logical instance name for the current application, which can be
+    used to differentiate between multiple identical applications running on the
+    same host.
+
+--ShutdownWhenPidExits: Specifies the process ID of a process that should be
+    monitored. When the process exists, a graceful shutdown is performed.
+
+--ServiceDrainTimeSec: Specifies drain time in this time the service status will
+    be 521.
+
+--OnStopWaitTimeSec: Defines the time to wait for the service to stop, default
+    is 10 seconds. Only after OnStopWaitTimeSec+ServiceDrainTimeSec the service
+    will be forcibly closed.
+
+--InitTimeOutSec: Defines the time to wait for the service to start, if elapsed,
+    the service start aborted. Default is 180 seconds.
+
+--BasePortOfPrimarySilo: Secondary nodes without ZooKeeper are only supported on
+    a developer's machine (or unit tests). In case the primary node runs on a
+    custom port (i.e. uses BasePortOverride), secondary nodes need to be able to
+    know what port it's running at. Use this property.
+";
+
     }
 
 
@@ -244,7 +350,17 @@ namespace Gigya.Microdot.SharedLogic
         /// Specifies that the service will run as a Windows service. This is the default value when compiled with
         /// 'Release'.
         /// </summary>
-        WindowsService
+        WindowsService,
+
+		/// <summary>
+		/// Specifies that the service will run to verify configuration objects only (while performing only minimal required initialization).
+		/// Available IConfigObject implementations (config objects) in service assemblies will be instantiated to pass validations.
+		/// </summary>
+		/// <remarks>
+		/// The validation errors will be reported in console. Config objects will be discovered with <see cref="AssemblyProvider"/>
+		/// considering assemblies black list.
+		/// </remarks>
+	    VerifyConfigurations
     }
 
 
@@ -292,7 +408,8 @@ namespace Gigya.Microdot.SharedLogic
         /// Specifies that this node is the primary node in a local cluster, and should host it's own in-memory
         /// membership and reminder tables. This is the default when running as either
         /// <see cref="ServiceStartupMode.CommandLineInteractive" /> or
-        /// <see cref="ServiceStartupMode.CommandLineNonInteractive" />.
+        /// <see cref="ServiceStartupMode.CommandLineNonInteractive" /> or
+        /// <see cref="ServiceStartupMode.VerifyConfigurations" />.
         /// </summary>
         PrimaryNode,
 

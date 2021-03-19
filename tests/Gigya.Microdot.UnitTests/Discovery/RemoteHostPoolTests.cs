@@ -9,23 +9,23 @@ using System.Threading.Tasks.Dataflow;
 using Gigya.Common.Contracts.Exceptions;
 using Gigya.Microdot.Fakes;
 using Gigya.Microdot.Interfaces.Logging;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.ServiceDiscovery;
 using Gigya.Microdot.ServiceDiscovery.HostManagement;
 using Gigya.Microdot.SharedLogic.Monitor;
-using Gigya.Microdot.Testing;
 using Gigya.Microdot.Testing.Shared;
 using Gigya.Microdot.Testing.Shared.Utils;
 using Metrics;
 
 using Ninject;
-
+using NSubstitute;
 using NUnit.Framework;
 
 using Shouldly;
 
 namespace Gigya.Microdot.UnitTests.Discovery
 {
-    [TestFixture]
+    [TestFixture,Parallelizable(ParallelScope.Fixtures)]
     public class RemoteHostPoolTests
     {
         private const string SERVICE_NAME = "ServiceName";
@@ -54,7 +54,7 @@ namespace Gigya.Microdot.UnitTests.Discovery
             _discoverySourceMock = new DiscoverySourceMock(serviceContext, endPoints);
             
             Pool = factory.Create(
-                new ServiceDeployment(SERVICE_NAME, "prod"), 
+                new DeploymentIdentifier(SERVICE_NAME, "prod", Substitute.For<IEnvironment>()), 
                 _discoverySourceMock, 
                 isReachableChecker ?? (rh => Task.FromResult(false)));
 

@@ -32,7 +32,7 @@ using System.Runtime;
 using System.Text;
 using Gigya.Microdot.Configuration;
 using Gigya.Microdot.Interfaces;
-using Gigya.Microdot.Interfaces.Configuration;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.SharedLogic;
 using Newtonsoft.Json;
 
@@ -40,23 +40,25 @@ namespace Gigya.Microdot.Hosting.HttpService.Endpoints
 {
     public class ConfigurationResponseBuilder
     {
-        JsonSerializerSettings JsonSettings = new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore, Formatting = Formatting.Indented};
+        readonly JsonSerializerSettings JsonSettings = new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore, Formatting = Formatting.Indented};
 
         private UsageTracking UsageTracking { get; }
         private ServiceArguments ServiceArguments { get; }
+        public CurrentApplicationInfo AppInfo { get; }
         private ConfigCache ConfigCache { get; }
-        private IEnvironmentVariableProvider Envs { get; }
+        private IEnvironment Envs { get; }
         private IAssemblyProvider AssemblyProvider { get; }
 
-
         public ConfigurationResponseBuilder(ConfigCache configCache,
-                                            IEnvironmentVariableProvider envs,
+                                            IEnvironment envs,
                                             IAssemblyProvider assemblyProvider,
                                             UsageTracking usageTracking,
-                                            ServiceArguments serviceArguments)
+                                            ServiceArguments serviceArguments,
+                                            CurrentApplicationInfo appInfo)
         {
             UsageTracking = usageTracking;
             ServiceArguments = serviceArguments;
+            AppInfo = appInfo;
             ConfigCache = configCache;
             Envs = envs;
             AssemblyProvider = assemblyProvider;
@@ -159,10 +161,10 @@ namespace Gigya.Microdot.Hosting.HttpService.Endpoints
 
         private Dictionary<string, string> GetEnvironmentVariables()
         {
-            return Environment.GetEnvironmentVariables()
+            return System.Environment.GetEnvironmentVariables()
                        .OfType<DictionaryEntry>()
                        .Select(x => new { Name = (string)x.Key, Value = (string)x.Value })
-                       .Where(x => x.Name.ToUpper() == "DC" || x.Name.ToUpper() == "ENV" || x.Name.ToUpper().Contains("GIGYA"))
+                       .Where(x => x.Name.ToUpper() == "DC" || x.Name.ToUpper() == "ZONE" || x.Name.ToUpper() == "REGION" || x.Name.ToUpper() == "ENV" || x.Name.ToUpper().Contains("GIGYA"))
                        .OrderBy(x => x.Name)
                        .ToDictionary(x => x.Name, x => x.Value);
         }
@@ -183,32 +185,41 @@ namespace Gigya.Microdot.Hosting.HttpService.Endpoints
 
         private string GetVersion(Assembly assembly)
         {
-            var assemblyVersion = assembly.GetName().Version.ToString();
-            var productVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            string assemblyVersion = assembly.GetName().Version.ToString();
 
-            if (productVersion != null && assemblyVersion != productVersion && assemblyVersion.StartsWith(productVersion) == false)
-                return $"{assemblyVersion} ({productVersion})";
+            try
+            {
+                string productVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+                if (productVersion != null && assemblyVersion != productVersion && assemblyVersion.StartsWith(productVersion) == false)
+                    return $"{assemblyVersion} ({productVersion})";
+            }
+            catch
+            {
+                // Ignore, best effort. GetCustomAttribute() can sometimes throw FileNotFoundException or other exceptions when it
+                // needs to load additional assemblies to resolve the attribute.
+            }
 
             return assemblyVersion;
         }
 
 
+        // TODO: Check this on Linux windows for discrepancies
         private Dictionary<string, string> GetRuntimeInfo()
         {
             return new Dictionary<string, string>
             {
-                { "ApplicationName", CurrentApplicationInfo.Name },
-                { "HostName", CurrentApplicationInfo.HostName },
-                { "InstanceName", CurrentApplicationInfo.InstanceName },
-                { "OSUser", CurrentApplicationInfo.OsUser },
-                { "OSVersion", Environment.OSVersion.ToString() },
-                { "CommandLine", Environment.CommandLine },
-                { "CurrentDirectory", Environment.CurrentDirectory },
-                { "Is64BitOperatingSystem", Environment.Is64BitOperatingSystem.ToString() },
-                { "Is64BitProcess", Environment.Is64BitProcess.ToString() },
-                { "ProcessorCount", Environment.ProcessorCount.ToString() },
-                { "UserInteractive", Environment.UserInteractive.ToString() },
-                { "ClrVersion", Environment.Version.ToString() },
+                { "ApplicationName", AppInfo.Name },
+                { "HostName", CurrentApplicationInfo.HostName},
+                { "InstanceName", Envs.InstanceName },
+                { "OSUser", AppInfo.OsUser },
+                { "OSVersion", System.Environment.OSVersion.ToString() },
+                { "CommandLine", System.Environment.CommandLine },
+                { "CurrentDirectory", System.Environment.CurrentDirectory },
+                { "Is64BitOperatingSystem", System.Environment.Is64BitOperatingSystem.ToString() },
+                { "Is64BitProcess", System.Environment.Is64BitProcess.ToString() },
+                { "ProcessorCount", System.Environment.ProcessorCount.ToString() },
+                { "UserInteractive", System.Environment.UserInteractive.ToString() },
+                { "ClrVersion", System.Environment.Version.ToString() },
                 { "CurrentProcessId", Process.GetCurrentProcess().Id.ToString() },
                 { "CurrentCulture", CultureInfo.CurrentCulture.ToString() },
                 { "CurrentUICulture", CultureInfo.CurrentUICulture.ToString() },

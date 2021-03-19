@@ -23,6 +23,7 @@
 using System;
 using Gigya.Microdot.Interfaces.Configuration;
 using Gigya.Microdot.Interfaces.Logging;
+using Gigya.Microdot.Interfaces.SystemWrappers;
 
 namespace Gigya.Microdot.Interfaces.Events
 {
@@ -31,13 +32,23 @@ namespace Gigya.Microdot.Interfaces.Events
         string EventType { get; }
 
         bool ShouldAudit { get; }
-        
+
         DateTime Timestamp { get;  }
 
-        IEventConfiguration Configuration { get; set; }
+        EventConfiguration Configuration { get; set; }
 
-        IEnvironmentVariableProvider EnvironmentVariableProvider { get; set; }
+        IEnvironment Environment { get; set; }
 
         IStackTraceEnhancer StackTraceEnhancer { get; set; }
+
+        string HostName { get; set; }
+        
+        string InfraVersion { get; set; }
+        
+        string ServiceVersion { get; set; }
+        
+        string ServiceInstanceName { get; set; }
+
+        string ServiceName { get; set; }
     }
 }

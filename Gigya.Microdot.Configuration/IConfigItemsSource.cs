@@ -20,12 +20,20 @@
 // POSSIBILITY OF SUCH DAMAGE.
 #endregion
 
+using System;
 using System.Threading.Tasks;
 
 namespace Gigya.Microdot.Configuration
 {
+    /// <summary>
+    /// Encapsulate the fetching of configuration values behavior.
+    /// </summary>
     public interface IConfigItemsSource
     {
-        Task<ConfigItemsCollection> GetConfiguration();
+        /// <summary>
+        /// Gets the collection of config items.
+        /// </summary>
+        /// <returns></returns>
+        Task<(ConfigItemsCollection Configs, DateTime? LastModified)> GetConfiguration();
     }
 }

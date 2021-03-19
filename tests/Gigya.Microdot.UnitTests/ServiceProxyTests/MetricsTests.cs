@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 using Gigya.Common.Contracts.Exceptions;
 using Gigya.Microdot.ServiceProxy;
-
+using Gigya.Microdot.SharedLogic.HttpService;
 using Metrics;
 using Metrics.MetricData;
 
@@ -18,7 +18,9 @@ using RichardSzalay.MockHttp;
 
 
 namespace Gigya.Microdot.UnitTests.ServiceProxyTests
-{  
+{
+    [TestFixture, Parallelizable(ParallelScope.None)]
+
     public class MetricsTests : AbstractServiceProxyTest
     {
         [Test]
@@ -26,10 +28,17 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         {            
             var resMessage = HttpResponseFactory.GetResponse(content:"''");
 
-            var messageHandler = new MockHttpMessageHandler();
-            messageHandler.When("*").Respond(resMessage);
-            
-            await CreateClient(messageHandler).ToUpper("aaaa");
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var messageHandler = new MockHttpMessageHandler();
+                messageHandler.When("*").Respond(resMessage);
+
+                return messageHandler;
+            };
+
+            unitTesting.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory);
+
+            await CreateClient().ToUpper("aaaa");
 
             var expected = DefaultExpected();
 
@@ -42,12 +51,19 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         [Test]
         public async Task RequestTimeoutTest()
         {
-            var messageHandler = new MockHttpMessageHandler();
-            messageHandler.When("*").Respond(a => { throw new TaskCanceledException(); });
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var messageHandler = new MockHttpMessageHandler();
+                messageHandler.When("*").Respond(a => { throw new TaskCanceledException(); });
+
+                return messageHandler;
+            };
+
+            unitTesting.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory);
 
             try
             {
-                await CreateClient(messageHandler).ToUpper("aaaa");
+                await CreateClient().ToUpper("aaaa");
             }
             catch (Exception)
             {
@@ -64,12 +80,19 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         {            
             var resMessage = HttpResponseFactory.GetResponse(HttpStatusCode.ServiceUnavailable, isGigyaHost:false);
 
-            var messageHandler = new MockHttpMessageHandler();
-            messageHandler.When("*").Respond(resMessage);
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var messageHandler = new MockHttpMessageHandler();
+                messageHandler.When("*").Respond(resMessage);
+
+                return messageHandler;
+            };
+
+            unitTesting.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory);
 
             try
             {
-                await CreateClient(messageHandler).ToUpper("aaaa");
+                await CreateClient().ToUpper("aaaa");
             }
             catch (Exception)
             {
@@ -86,12 +109,19 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         {
             var resMessage = HttpResponseFactory.GetResponse(isGigyaHost: false);
 
-            var messageHandler = new MockHttpMessageHandler();
-            messageHandler.When("*").Respond(resMessage);
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var messageHandler = new MockHttpMessageHandler();
+                messageHandler.When("*").Respond(resMessage);
+
+                return messageHandler;
+            };
+
+            unitTesting.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory);
 
             try
             {
-                await CreateClient(messageHandler).ToUpper("aaaa");
+                await CreateClient().ToUpper("aaaa");
             }
             catch (Exception)
             {
@@ -107,13 +137,20 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         public async Task JsonSerializationExceptionTest()
         {
             var resMessage = HttpResponseFactory.GetResponse(content: "{");
-            
-            var messageHandler = new MockHttpMessageHandler();
-            messageHandler.When("*").Respond(resMessage);
+
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var messageHandler = new MockHttpMessageHandler();
+                messageHandler.When("*").Respond(resMessage);
+
+                return messageHandler;
+            };
+
+            unitTesting.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory);
 
             try
             {
-                await CreateClient(messageHandler).ToUpper("aaaa");
+                await CreateClient().ToUpper("aaaa");
             }
             catch (Exception)
             {
@@ -129,12 +166,19 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         [Test]
         public async Task HostsFailureTest()
         {
-            var messageHandler = new MockHttpMessageHandler();
-            messageHandler.When("*").Respond(a => { throw new HttpRequestException(); });
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var messageHandler = new MockHttpMessageHandler();
+                messageHandler.When("*").Respond(a => { throw new HttpRequestException(); });
+
+                return messageHandler;
+            };
+
+            unitTesting.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory);
 
             try
             {
-                await CreateClient(messageHandler).ToUpper("aaaa");
+                await CreateClient().ToUpper("aaaa");
             }
             catch (Exception)
             {
@@ -152,13 +196,20 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         public async Task NullExceptionReceivedTest()
         {
             var resMessage = HttpResponseFactory.GetResponseWithException(ExceptionSerializer, new NullReferenceException());
-            
-            var messageHandler = new MockHttpMessageHandler();
-            messageHandler.When("*").Respond(resMessage);
+
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var messageHandler = new MockHttpMessageHandler();
+                messageHandler.When("*").Respond(resMessage);
+
+                return messageHandler;
+            };
+
+            unitTesting.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory);
 
             try
             {
-                await CreateClient(messageHandler).ToUpper("aaaa");
+                await CreateClient().ToUpper("aaaa");
             }
             catch (Exception)
             {
@@ -175,13 +226,20 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         public async Task RequestExceptionReceivedTest()
         {
             var resMessage = HttpResponseFactory.GetResponseWithException(ExceptionSerializer, new RequestException("Post not allowed"), HttpStatusCode.MethodNotAllowed);
-            
-            var messageHandler = new MockHttpMessageHandler();
-            messageHandler.When("*").Respond(resMessage);
-                                           
+
+            Func<HttpClientConfiguration, HttpMessageHandler> messageHandlerFactory = _ =>
+            {
+                var messageHandler = new MockHttpMessageHandler();
+                messageHandler.When("*").Respond(resMessage);
+
+                return messageHandler;
+            };
+
+            unitTesting.Rebind<Func<HttpClientConfiguration, HttpMessageHandler>>().ToMethod(c => messageHandlerFactory);
+
             try
             {
-                await CreateClient(messageHandler).ToUpper("aaaa");
+                await CreateClient().ToUpper("aaaa");
             }
             catch (RequestException)
             {
@@ -198,7 +256,7 @@ namespace Gigya.Microdot.UnitTests.ServiceProxyTests
         {
             return
                 Metric.Context(ServiceProxyProvider.METRICS_CONTEXT_NAME)
-                    .Context(SERVICE_NAME)
+                    .Context("DemoService")
                     .DataProvider.CurrentMetricsData;
         }
 

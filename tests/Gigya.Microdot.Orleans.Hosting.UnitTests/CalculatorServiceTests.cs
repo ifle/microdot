@@ -1,4 +1,4 @@
-﻿#region Copyright 
+﻿#region Copyright
 // Copyright 2017 Gigya Inc.  All rights reserved.
 // 
 // Licensed under the Apache License, Version 2.0 (the "License"); 
@@ -22,19 +22,22 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
+using System.Net;
 using System.Threading.Tasks;
-using Gigya.Microdot.Fakes;
-using Gigya.Microdot.Hosting.Events;
+using Gigya.Microdot.Common.Tests;
+using Gigya.Microdot.Hosting.Environment;
 using Gigya.Microdot.Interfaces;
-using Gigya.Microdot.Interfaces.Events;
-using Gigya.Microdot.Interfaces.HttpService;
+using Gigya.Microdot.Interfaces.Configuration;
+using Gigya.Microdot.Ninject;
+using Gigya.Microdot.Orleans.Hosting.UnitTests.Microservice;
 using Gigya.Microdot.Orleans.Hosting.UnitTests.Microservice.CalculatorService;
 using Gigya.Microdot.ServiceProxy;
-using Gigya.Microdot.Testing;
+using Gigya.Microdot.ServiceProxy.Caching;
+using Gigya.Microdot.SharedLogic.HttpService;
 using Gigya.Microdot.Testing.Service;
-using Gigya.Microdot.Testing.Shared;
+using Gigya.Microdot.UnitTests.Caching.Host;
+using Gigya.ServiceContract.Attributes;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Ninject;
@@ -60,24 +63,38 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
         }
     }
 
-    [TestFixture]
+    [TestFixture, Parallelizable(ParallelScope.Fixtures)] // We seeing there is some expectation to not run in parallel between the tests!
     public class CalculatorServiceTests
     {
         private ServiceTester<CalculatorServiceHost> Tester { get; set; }
+        public IServiceProxyProvider ProxyProvider { get; private set; }
+
         private ICalculatorService Service { get; set; }
         private ICalculatorService ServiceWithCaching { get; set; }
-
+        private readonly FakeRevokingManager _fakeRevokingManager = new FakeRevokingManager();
 
         [OneTimeSetUp]
         public void SetUp()
         {
             try
             {
-
-                Tester = AssemblyInitialize.ResolutionRoot.GetServiceTester<CalculatorServiceHost>(writeLogToFile: true);
+                Tester = new ServiceTester<CalculatorServiceHost>
+                {
+                    CommunicationKernel = new MicrodotInitializer(
+                        "CalculatorServiceCommLayer",
+                        new ConsoleLogLoggersModules(),
+                        k =>
+                        {
+                            k.Rebind<ICacheRevoker>().ToConstant(_fakeRevokingManager);
+                            k.Rebind<IRevokeListener>().ToConstant(_fakeRevokingManager);
+                            k.Rebind<ICertificateLocator>().To<DummyCertificateLocator>().InSingletonScope();
+                        }                    
+                    ).Kernel
+                };
+                
                 Service = Tester.GetServiceProxy<ICalculatorService>();
                 ServiceWithCaching = Tester.GetServiceProxyWithCaching<ICalculatorService>();
-
+                ProxyProvider = Tester.GetServiceProxyProvider("CalculatorService");
             }
             catch (Exception e)
             {
@@ -85,7 +102,6 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
                 throw;
             }
         }
-
 
         [OneTimeTearDown]
         public void TearDown()
@@ -170,35 +186,29 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
             const string localDateString = "2016-07-31T10:00:00+03:00";
             var localDateTime = DateTime.Parse(localDateString);
             var localDateTimeOffset = DateTimeOffset.Parse(localDateString);
-            var ukernel = new TestingKernel<ConsoleLog>();
 
-            var providerFactory = ukernel.Get<Func<string, ServiceProxyProvider>>();
-            var serviceProxy = providerFactory("CalculatorService");
             var dict = new Dictionary<string, object>
             {
                 {"localDateTime", localDateTime},
                 {"localDateTimeOffset", localDateTimeOffset}
             };
-            serviceProxy.DefaultPort = 6555;
 
-            var res = await serviceProxy.Invoke(new HttpServiceRequest("ToUniversalTime", typeof(ICalculatorService).FullName, dict), typeof(JObject));
+            var res = await ProxyProvider.Invoke(new HttpServiceRequest("ToUniversalTime", typeof(ICalculatorService).FullName, dict), typeof(JObject));
             var json = (JToken)res;
             DateTimeOffset.Parse(json["Item1"].Value<string>()).ShouldBe(DateTime.Parse(localDateString).ToUniversalTime());
             DateTimeOffset.Parse(json["Item2"].Value<string>()).ShouldBe(localDateTimeOffset.DateTime);
         }
 
+
         [Test]
         public async Task CallWeakRequestWith_ComplexObject_ParamAndNoReturnType()
         {
-            var ukernel = new TestingKernel<ConsoleLog>();
 
-            var providerFactory = ukernel.Get<Func<string, ServiceProxyProvider>>();
-            var serviceProxy = providerFactory("CalculatorService");
+
             var wrapper = new Wrapper { INT = 100, STR = "100" };
             var dict = new Dictionary<string, object> { { "wrapper", JsonConvert.SerializeObject(wrapper) } };
-            serviceProxy.DefaultPort = 6555;
 
-            var res = await serviceProxy.Invoke(new HttpServiceRequest("DoComplex", typeof(ICalculatorService).FullName, dict), typeof(JObject));
+            var res = await ProxyProvider.Invoke(new HttpServiceRequest("DoComplex", typeof(ICalculatorService).FullName, dict), typeof(JObject));
 
             ((JToken)res).ToObject<Wrapper>().INT.ShouldBe(wrapper.INT);
             ((JToken)res).ToObject<Wrapper>().STR.ShouldBe(wrapper.STR);
@@ -208,14 +218,11 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
         [Test]
         public async Task CallWeakRequestWith_Int_ParamAndNoReturnType()
         {
-            var ukernel = new TestingKernel<ConsoleLog>();
 
-            var providerFactory = ukernel.Get<Func<string, ServiceProxyProvider>>();
-            var serviceProxy = providerFactory("CalculatorService");
+
             var dict = new Dictionary<string, object> { { "a", "5" } };
-            serviceProxy.DefaultPort = 6555;
 
-            var res = await serviceProxy.Invoke(new HttpServiceRequest("DoInt", typeof(ICalculatorService).FullName, dict), typeof(JObject));
+            var res = await ProxyProvider.Invoke(new HttpServiceRequest("DoInt", typeof(ICalculatorService).FullName, dict), typeof(JObject));
             ((JToken)res).Value<int>().ShouldBe(5);
         }
 
@@ -223,14 +230,11 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
         [Test]
         public async Task CallWeakRequestWith_NoParamsAndNoReturnType()
         {
-            var ukernel = new TestingKernel<ConsoleLog>();
-
-            var providerFactory = ukernel.Get<Func<string, ServiceProxyProvider>>();
-            var serviceProxy = providerFactory("CalculatorService");
+            ;
             var dict = new Dictionary<string, object>();
-            serviceProxy.DefaultPort = 6555;
 
-            var res = await serviceProxy.Invoke(new HttpServiceRequest("Do", typeof(ICalculatorService).FullName, dict), typeof(JObject));
+
+            var res = await ProxyProvider.Invoke(new HttpServiceRequest("Do", typeof(ICalculatorService).FullName, dict), typeof(JObject));
             var json = (JToken)res;
             json.ShouldBe(null);
         }
@@ -238,14 +242,10 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
         [Test]
         public async Task CallWeakRequestWith_NoParamsAndNoReturnTypeAndNoType()
         {
-            var ukernel = new TestingKernel<ConsoleLog>();
 
-            var providerFactory = ukernel.Get<Func<string, ServiceProxyProvider>>();
-            var serviceProxy = providerFactory("CalculatorService");
             var dict = new Dictionary<string, object>();
-            serviceProxy.DefaultPort = 6555;
 
-            var res = await serviceProxy.Invoke(new HttpServiceRequest("Do", dict), typeof(JObject));
+            var res = await ProxyProvider.Invoke(new HttpServiceRequest("Do", null, dict), typeof(JObject));
             var json = (JToken)res;
             json.ShouldBe(null);
         }
@@ -287,7 +287,7 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
             //Items shouldBe come from the Cache
             secondValue.ShouldBe(firstValue);
 
-            await AssemblyInitialize.ResolutionRoot.Get<ICacheRevoker>().Revoke(id);
+            await _fakeRevokingManager.Revoke(id);
 
             //Items shouldBe remove from Cache
             await Task.Delay(200);
@@ -296,14 +296,6 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
             threadValue.ShouldNotBe(secondValue);
         }
 
-        [Test]
-        public async Task LogTest()
-        {
-            var logMessage = $"log-{Guid.NewGuid()}";
-            await Service.LogData(logMessage);
-            await Task.Delay(100);
-            File.ReadAllText("TestLog.txt").ShouldContain(logMessage);
-        }
 
         [Test]
         public async Task ShouldPublishEventWithCallParametersDefault()
@@ -314,7 +306,7 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
             var @default = "default Test";
 
             await Service.LogPram(sensitive, nonsensitive, notExists, @default);
-            (await Service.IsLogPramSucceed(new List<string>{@default, sensitive }, new List<string> { nonsensitive }, new List<string> { notExists })).ShouldBeTrue();
+            (await Service.IsLogParamSucceeded(new List<string> { @default, sensitive }, new List<string> { nonsensitive }, new List<string> { notExists })).ShouldBeTrue();
         }
 
         [Test]
@@ -326,7 +318,113 @@ namespace Gigya.Microdot.Orleans.Hosting.UnitTests
             var @default = "default Test";
 
             await Service.LogPram2(sensitive, nonsensitive, notExists, @default);
-            (await Service.IsLogPramSucceed(new List<string> {  sensitive }, new List<string> { nonsensitive , @default }, new List<string> { notExists })).ShouldBeTrue();
+            (await Service.IsLogParamSucceeded(new List<string> { sensitive }, new List<string> { nonsensitive, @default }, new List<string> { notExists })).ShouldBeTrue();
         }
+
+
+        [Test]
+        public async Task SendComplexRequest()
+        {
+            var person = new Person();
+
+            await Service.CreatePerson(person);
+            (await Service.IsLogParamSucceeded(
+                sensitives: new List<string> { person.ID.ToString(), person.Gender },
+                NoneSensitives: new List<string> { person.Name },
+                NotExists: new List<string> { person.Password })).ShouldBeTrue();
+        }
+
+        [Test]
+        public async Task SendComplexWithInheritenceRequest()
+        {
+            var teacher = new Teacher();
+
+            await Service.CreatePerson(teacher);
+            (await Service.IsLogParamSucceeded(
+                sensitives: new List<string> { teacher.ID.ToString(), teacher.Gender },
+                NoneSensitives: new List<string> { teacher.Name, teacher.School },
+                NotExists: new List<string> { teacher.Password })).ShouldBeTrue();
+        }
+
+
+
+        [Test]
+        public async Task CreateDynamicallyMockPerson()
+        {
+            var person = new Person();
+
+            await Service.CreatePerson(person);
+            (await Service.ValidatePersonLogFields(person)).ShouldBeTrue();
+        }
+
+        [Test]
+        public async Task CreateDynamicallyWithInheritenceMock()
+        {
+            var person = new Teacher();
+
+            await Service.CreatePerson(person);
+            (await Service.ValidatePersonLogFields(person)).ShouldBeTrue();
+
+        }
+
+        [Test]
+        public async Task LogGrainId()
+        {
+            await Service.LogGrainId();
+        }
+
+        [Test,Ignore("This silo need to run on separate app domain from nunit it should set default before any Regex is called")]
+        public async Task RegexTestWithTimeout()
+        {
+            //This silo need to run on separate app domain from nunit it should set default before any Regex is called
+            await Service.RegexTestWithDefaultTimeoutDefault(10);
+        }
+
+        #region MockData
+        public class Person
+        {
+            public int ID { get; set; } = 100;
+
+            [NonSensitive]
+            public string Name { get; set; } = "Eli";
+
+            [Sensitive(Secretive = false)]
+            public string Gender { get; set; } = "Man";
+
+            [Sensitive(Secretive = true)]
+            public string Password { get; set; } = "password";
+
+            public InnerCarMockClass InnerCarMockClass { get; set; } = new InnerCarMockClass();
+        }
+
+        public class InnerCarMockClass
+        {
+            [NonSensitive] public int Year { get; set; } = 100;
+
+            [NonSensitive] public string LisencePlates { get; set; } = "11 -222-33";
+        }
+
+        [Serializable]
+        public class Teacher : Person
+        {
+
+            [NonSensitive]
+            public string FieldNonSensitive = "FieldName";
+
+
+            [Sensitive(Secretive = false)]
+
+            public string FieldSensitive = "FieldSensitive";
+
+            [Sensitive(Secretive = true)]
+
+            public string FieldCryptic = "FieldCryptic";
+
+
+            [NonSensitive]
+            public string School { get; set; } = "Busmat";
+        }
+
+        #endregion
     }
 }
